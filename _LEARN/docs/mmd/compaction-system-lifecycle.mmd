@@ -1,0 +1,86 @@
+flowchart TD
+    subgraph Trigger["Compaction Trigger"]
+        A[Message Added to Session] --> B[Calculate Context Tokens]
+        B --> C{Exceeds Threshold?}
+        C -->|No| D[Continue Normal Flow]
+        C -->|Yes| E[Trigger Compaction]
+    end
+
+    subgraph Preparation["Compaction Preparation"]
+        E --> F[prepareCompaction]
+        F --> G[Find Previous Compaction]
+        G --> H[Establish Boundaries]
+        H --> I[findCutPoint]
+        I --> J[Calculate Token Budget]
+        J --> K[Walk Backwards from Newest]
+        K --> L[Accumulate Tokens]
+        L --> M{Budget Reached?}
+        M -->|No| K
+        M -->|Yes| N[Find Valid Cut Point]
+        N --> O[Extract Messages to Summarize]
+        O --> P[Extract File Operations]
+    end
+
+    subgraph CutPointAnalysis["Cut Point Analysis"]
+        N --> Q{Cut Point Type?}
+        Q -->|User Message| R[Clean Cut]
+        Q -->|Assistant Message| S[Split Turn]
+        Q -->|Other| T[Include Non-Messages]
+        S --> U[Identify Turn Start]
+        U --> V[Separate Prefix/Suffix]
+    end
+
+    subgraph Summarization["Summary Generation"]
+        O --> W{Previous Summary?}
+        W -->|Yes| X[Use Update Prompt]
+        W -->|No| Y[Use Initial Prompt]
+        X --> Z[generateSummary]
+        Y --> Z
+        Z --> AA[Call LLM API]
+        AA --> AB{Split Turn?}
+        AB -->|Yes| AC[generateTurnPrefixSummary]
+        AB -->|No| AD[Single Summary]
+        AC --> AE[Merge Summaries]
+    end
+
+    subgraph FileTracking["File Operations Tracking"]
+        P --> AF[Extract Tool Calls]
+        AF --> AG[Categorize by Operation]
+        AG --> AH[read/write/edit Sets]
+        AH --> AI[Merge with Previous]
+        AI --> AJ[Compute Final Lists]
+        JJ --> AK[Format as XML Tags]
+    end
+
+    subgraph Result["Compaction Result"]
+        AE --> AL[Create Compaction Entry]
+        AD --> AL
+        AK --> AL
+        AL --> AM[Save to Session]
+        AM --> AN[Remove Old Entries]
+        AN --> AO[Add Compaction Message]
+        AO --> AP[Reload Session]
+    end
+
+    subgraph BranchSummary["Branch Summarization"]
+        AQ[User Navigates Away] --> AR[collectEntriesForBranchSummary]
+        AR --> AS[Find Common Ancestor]
+        AS --> AT[Collect Branch Entries]
+        AT --> AU[prepareBranchEntries]
+        AU --> AV[Generate Branch Summary]
+        AV --> AW[Create Branch Summary Entry]
+        AW --> AX[Insert at New Position]
+    end
+
+    Trigger --> Preparation
+    Preparation --> CutPointAnalysis
+    CutPointAnalysis --> Summarization
+    Summarization --> FileTracking
+    FileTracking --> Result
+
+    style A fill:#e1f5ff
+    style F fill:#fff4e6
+    style I fill:#f3e5f5
+    style Z fill:#e8f5e9
+    style AL fill:#ffebee
+    style S fill:#fff9c4

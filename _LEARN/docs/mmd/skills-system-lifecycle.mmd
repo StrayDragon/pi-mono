@@ -1,0 +1,69 @@
+flowchart TD
+    subgraph Discovery["Skill Discovery"]
+        A[Load Skills Configuration] --> B{Skill Type?}
+        B -->|User Skills| C[~/.pi/skills/]
+        B -->|Project Skills| D[.pi/skills/]
+        B -->|Explicit Paths| E[Custom Paths]
+        C --> F[Scan Directories]
+        D --> F
+        E --> F
+    end
+
+    subgraph Scanning["Directory Scanning"]
+        F --> G{Has SKILL.md?}
+        G -->|Yes| H[Load as Single Skill]
+        G -->|No| I[Recurse Subdirectories]
+        I --> J{Has .md Files?}
+        J -->|Yes| K[Load Each .md as Skill]
+        J -->|No| L[Skip Directory]
+        K --> M[Apply .gitignore Rules]
+        H --> M
+    end
+
+    subgraph Loading["Skill Loading"]
+        M --> N[Parse Frontmatter]
+        N --> O[Extract name & description]
+        O --> P[Validate Name Format]
+        P --> Q{Valid?}
+        Q -->|No| R[Add Diagnostic Warning]
+        Q -->|Yes| S[Check disable-model-invocation]
+        S --> T{Disabled?}
+        T -->|Yes| U[Exclude from Prompt]
+        T -->|No| V[Include in Available Skills]
+    end
+
+    subgraph PromptIntegration["Prompt Integration"]
+        V --> W[Format as XML]
+        W --> X[Add to System Prompt]
+        X --> Y[Agent Can Reference Skills]
+    end
+
+    subgraph Invocation["Skill Invocation"]
+        Y --> Z{Invocation Type?}
+        Z -->|Model Reads| AA[Agent Calls read tool]
+        AA --> AB[Load SKILL.md Content]
+        Z -->|Explicit Command| AC[/skill:name Command]
+        AC --> AD[Directly Load Content]
+        AB --> AE[Apply to Context]
+        AD --> AE
+    end
+
+    subgraph CollisionHandling["Name Collision Handling"]
+        N --> AF{Name Exists?}
+        AF -->|Yes| AG[Resolve by Priority]
+        AG --> AH{User vs Project?}
+        AH -->|User wins| AI[Keep User Skill]
+        AH -->|Project wins| AJ[Keep Project Skill]
+        AH -->|Path loses| AK[Keep First Loaded]
+        AF -->|No| AL[Add to Skill Map]
+    end
+
+    Loading --> CollisionHandling
+    CollisionHandling --> PromptIntegration
+
+    style A fill:#e1f5ff
+    style N fill:#fff4e6
+    style W fill:#f3e5f5
+    style Z fill:#e8f5e9
+    style R fill:#ffebee
+    style AG fill:#fff9c4

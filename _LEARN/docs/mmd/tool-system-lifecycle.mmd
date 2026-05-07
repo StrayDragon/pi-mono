@@ -1,0 +1,44 @@
+sequenceDiagram
+    participant LLM as LLM
+    participant Loop as Agent Loop
+    participant Before as beforeToolCall hook
+    participant Tool as Tool.execute()
+    participant After as afterToolCall hook
+    participant UI as TUI
+
+    LLM->>Loop: AssistantMessage<br/>with toolCall
+    Loop->>Loop: prepareToolCallArguments()<br/>参数预处理
+    Loop->>Loop: validateToolArguments()<br/>TypeBox 验证
+    
+    alt Before hook exists
+        Loop->>Before: beforeToolCall(event)
+        alt Event.block() called
+            Before-->>Loop: blocked: true
+            Loop-->>LLM: ToolResultMessage<br/>error: "blocked"
+        else Normal flow
+            Before-->>Loop: blocked: false
+        end
+    end
+
+    Loop->>Tool: execute(toolCallId, params, signal, onUpdate)
+    
+    loop Tool execution
+        Tool->>Tool: do work
+        Tool->>Loop: onUpdate(partialResult)
+        Loop->>UI: render progress
+    end
+    
+    Tool-->>Loop: AgentToolResult
+    
+    alt After hook exists
+        Loop->>After: afterToolCall(event)
+        alt Result modified
+            After-->>Loop: modified result
+        else Original result
+            After-->>Loop: original result
+        end
+    end
+    
+    Loop->>Loop: createToolResultMessage()
+    Loop->>UI: emit message_end
+    Loop-->>LLM: ToolResultMessage

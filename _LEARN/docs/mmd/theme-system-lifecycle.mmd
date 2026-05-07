@@ -1,0 +1,107 @@
+# Theme System Lifecycle
+
+```mermaid
+flowchart TD
+    subgraph Discovery["Theme Discovery"]
+        A[Theme Request] --> B{Theme Type?}
+        B -->|Built-in| C[Load from getThemesDir]
+        B -->|Custom| D[Load from getCustomThemesDir]
+        B -->|Registered| E[Use Registered Instance]
+        C --> F[Parse JSON]
+        D --> F
+        E --> F
+    end
+
+    subgraph Validation["Theme Validation"]
+        F --> G[TypeBox Schema Check]
+        G --> H{Valid?}
+        H -->|No| I[Throw Error with Details]
+        H -->|Yes| J[Extract vars & colors]
+    end
+
+    subgraph Resolution["Color Resolution"]
+        J --> K[Resolve Variable References]
+        K --> L{Circular Ref?}
+        L -->|Yes| M[Throw Circular Error]
+        L -->|No| N[Resolve to hex or index]
+    end
+
+    subgraph ColorModeDetection["Color Mode Detection"]
+        N --> O[Detect Terminal Support]
+        O --> P{COLORTERM?}
+        P -->|truecolor/24bit| Q[truecolor mode]
+        P -->|Other| R{TERM?}
+        R -->|dumb/linux| S[256color mode]
+        R -->|screen/*| S
+        R -->|Apple_Terminal| S
+        R -->|Other| Q
+    end
+
+    subgraph Conversion["Color Conversion"]
+        Q --> T[Generate ANSI 24-bit Codes]
+        S --> U[Convert hex to 256-color]
+        U --> V[Find Closest Color Cube]
+        V --> W[Check Grayscale Distance]
+        W --> X{Saturation > 10?}
+        X -->|Yes| Y[Use Color Cube Index]
+        X -->|No| Z{Gray Closer?}
+        Z -->|Yes| AA[Use Grayscale Index]
+        Z -->|No| Y
+        Y --> AB[Generate ANSI 256 Codes]
+        AA --> AB
+    end
+
+    subgraph ThemeCreation["Theme Instance Creation"]
+        T --> AC[Create Theme Instance]
+        AB --> AC
+        AC --> AD[Store fgColors Map]
+        AD --> AE[Store bgColors Map]
+        AE --> AF[Set Color Mode]
+    end
+
+    subgraph HotReload["Hot Reload System"]
+        AF --> AG{Enable Watcher?}
+        AG -->|Yes| AH{Custom Theme?}
+        AH -->|Yes| AI[Start FSWatcher]
+        AH -->|No| AN[Skip Watcher]
+        AI --> AJ[File Changed]
+        AJ --> AK[100ms Debounce]
+        AK --> AL[Reload from Disk]
+        AL --> AM[Update Registry & Global]
+        AM --> AN[Trigger onThemeChange]
+        AG -->|No| AN
+    end
+
+    subgraph Application["Application Layer"]
+        AN --> AO[highlightCode]
+        AN --> AP[getMarkdownTheme]
+        AN --> AQ[getSelectListTheme]
+        AN --> AR[getEditorTheme]
+        AO --> AS[Syntax Highlighting]
+        AP --> AT[Markdown Rendering]
+        AQ --> AU[Select List Styling]
+        AR --> AV[Editor Borders]
+    end
+
+    subgraph HTMLExport["HTML Export"]
+        AC --> AW[getResolvedThemeColors]
+        AW --> AX[Convert to CSS Vars]
+        AX --> AY[Generate HTML Export]
+    end
+
+    Discovery --> Validation
+    Validation --> Resolution
+    Resolution --> ColorModeDetection
+    ColorModeDetection --> Conversion
+    Conversion --> ThemeCreation
+    ThemeCreation --> HotReload
+    HotReload --> Application
+    ThemeCreation --> HTMLExport
+
+    style A fill:#e1f5ff
+    style G fill:#fff4e6
+    style O fill:#f3e5f5
+    style AC fill:#e8f5e9
+    style AI fill:#ffebee
+    style I fill:#ffcccc
+    style M fill:#ffcccc

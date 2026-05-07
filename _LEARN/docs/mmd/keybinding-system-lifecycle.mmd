@@ -1,0 +1,69 @@
+
+flowchart TD
+    subgraph Definition["Keybinding Definition"]
+        A[Declare Keybindings Interface] --> B[Define Default Keys]
+        B --> C[Add Descriptions]
+        C --> D[Module Declaration Merging]
+    end
+
+    subgraph Initialization["Manager Initialization"]
+        D --> E[Create KeybindingsManager]
+        E --> F[Load User Config]
+        F --> G[Migrate Legacy Names]
+        G --> H[Parse Keybindings]
+        H --> I[Detect Conflicts]
+    end
+
+    subgraph ConflictResolution["Conflict Detection"]
+        I --> J{Key Claimed?}
+        J -->|Single| K[Assign to Action]
+        J -->|Multiple| L[Record Conflict]
+        L --> M[Report to User]
+        K --> N[Build keysById Map]
+    end
+
+    subgraph KeyInput["Key Input Processing"]
+        O[Terminal Input Received] --> P{Kitty Protocol?}
+        P -->|Yes| Q[Parse Kitty Escape Sequence]
+        P -->|No| R[Parse Legacy Sequence]
+        Q --> S[Extract Modifiers & Codepoint]
+        R --> S
+        S --> T[Generate KeyId]
+    end
+
+    subgraph Matching["Keybinding Matching"]
+        T --> U[matchesKey Called]
+        U --> V[Lookup in keysById]
+        V --> W{Match Found?}
+        W -->|Yes| X[Trigger Action]
+        W -->|No| Y[Check Next Binding]
+        Y --> Z{More Bindings?}
+        Z -->|Yes| V
+        Z -->|No| AA[Return No Match]
+    end
+
+    subgraph Configuration["User Configuration"]
+        AB[Edit keybindings.json] --> AC[Reload Manager]
+        AC --> AD[Rebuild Maps]
+        AD --> AE[Recheck Conflicts]
+        AE --> AF[Update Active Bindings]
+    end
+
+    subgraph TypeSafety["Type Safety Layer"]
+        AG[Key Helper Object] --> AH[Compile-Time Validation]
+        AH --> AI[Autocomplete Support]
+        AI --> AJ[Prevent Typos]
+    end
+
+    Definition --> Initialization
+    Initialization --> ConflictResolution
+    KeyInput --> Matching
+    Configuration --> Initialization
+    TypeSafety --> Definition
+
+    style A fill:#e1f5ff
+    style E fill:#fff4e6
+    style I fill:#f3e5f5
+    style Q fill:#e8f5e9
+    style X fill:#ffebee
+    style L fill:#fff9c4

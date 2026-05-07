@@ -1,0 +1,39 @@
+flowchart TD
+    subgraph "Session Management"
+        A[AgentSession] --> B[SessionManager]
+        B --> C[JSONL File]
+        C --> D[Load Entries]
+        D --> E[Build Index]
+        E --> F[Build Context]
+    end
+
+    subgraph "Operations"
+        G[Append Entry] --> H[Persist to JSONL]
+        I[Compact] --> J[Summarize Old Messages]
+        J --> K[Add CompactionEntry]
+        L[Navigate Tree] --> M[Change Leaf Pointer]
+        N[Fork] --> O[Create New Session File]
+    end
+
+    subgraph "Entry Types"
+        P[SessionMessageEntry]
+        Q[CompactionEntry]
+        R[BranchSummaryEntry]
+        S[CustomEntry]
+        T[CustomMessageEntry]
+        U[LabelEntry]
+        V[SessionInfoEntry]
+    end
+
+    F --> G
+    F --> I
+    F --> L
+    F --> N
+
+    style A fill:#e1f5fe
+    style B fill:#fff3e0
+    style C fill:#f3e5f5
+    style Q fill:#ffe0b2
+    style R fill:#ffe0b2
+    style S fill:#ffe0b2
+    style T fill:#ffe0b2
