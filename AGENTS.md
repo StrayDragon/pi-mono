@@ -6,13 +6,17 @@
 - No emojis in commits, issues, PR comments, or code
 - No fluff or cheerful filler text
 - Technical prose only, be kind but direct (e.g., "Thanks @user" not "Thanks so much @user!")
+- When the user asks a question, answer it first before making edits or running implementation commands.
 
 ## Code Quality
 
+- Read files in full before making wide-ranging changes, before editing files you have not already fully inspected, and when the user asks you to investigate or audit something. Do not rely only on search snippets for broad changes.
 - No `any` types unless absolutely necessary
+- Single-line helper functions with a single call site are forbidden; inline them instead.
 - Check node_modules for external API type definitions instead of guessing
 - **NEVER use inline imports** - no `await import("./foo.js")`, no `import("pkg").Type` in type positions, no dynamic imports for types. Always use standard top-level imports.
 - NEVER remove or downgrade code to fix type errors from outdated dependencies; upgrade the dependency instead
+- Use only erasable TypeScript syntax compatible with Node strip-only mode in TypeScript checked by the root config (`packages/*/src`, `packages/*/test`, and `packages/coding-agent/examples`). Do not use constructor parameter properties, `enum`, `namespace`/`module`, `import =`, `export =`, or other TypeScript constructs that require JavaScript emit. Use explicit fields and constructor assignments instead of parameter properties.
 - Always ask before removing functionality or code that appears to be intentional
 - Do not preserve backward compatibility unless the user explicitly asks for it
 - Never hardcode key checks with, eg. `matchesKey(keyData, "ctrl+x")`. All keybindings must be configurable. Add default to matching object (`DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS`)
@@ -22,14 +26,24 @@
 
 - After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
 - Note: `npm run check` does not run tests.
-- NEVER run: `npm run dev`, `npm run build`, `npm test`
+- NEVER run: `npm run build`, `npm test`
 - Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
 - Run tests from the package root, not the repo root.
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.
 - When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` plus the faux provider. Do not use real provider APIs, real API keys, or paid tokens.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` and name them `<issue-number>-<short-slug>.test.ts`.
+- For ad-hoc scripts, write the script to a temporary file (for example under `/tmp`) using `write`, run that file, edit it if needed, and remove it when it is no longer needed. Do not embed multi-line scripts directly in `bash` commands.
 - NEVER commit unless user asks
+
+## Dependency and Install Security
+
+- Treat npm dependency and lockfile changes as reviewed code changes. Direct external dependencies must stay pinned to exact versions.
+- Use `npm install --ignore-scripts` to hydrate/update `node_modules` locally. Use `npm ci --ignore-scripts` for clean installs/CI-style verification. Do not run lifecycle scripts unless the user explicitly asks.
+- If dependency metadata changes, run `npm install --package-lock-only --ignore-scripts` to update `package-lock.json` without installing or running scripts.
+- If `packages/coding-agent/npm-shrinkwrap.json` needs regeneration, run `node scripts/generate-coding-agent-shrinkwrap.mjs`; verify with `node scripts/generate-coding-agent-shrinkwrap.mjs --check` or `npm run check`.
+- Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set. Do not bypass it unless the user explicitly wants the lockfile change committed.
+- New dependencies with lifecycle scripts require review and an explicit allowlist entry in `scripts/generate-coding-agent-shrinkwrap.mjs`; do not add one silently.
 
 ## Contribution Gate
 
@@ -44,7 +58,7 @@
 When creating issues:
 
 - Add `pkg:*` labels to indicate which package(s) the issue affects
-  - Available labels: `pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`, `pkg:web-ui`
+  - Available labels: `pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`
 - If an issue spans multiple packages, add all relevant labels
 
 When posting issue/PR comments:
@@ -116,8 +130,8 @@ Use these sections under `## [Unreleased]`:
 
 ### Attribution
 
-- **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/badlogic/pi-mono/issues/123))`
-- **External contributions**: `Added feature X ([#456](https://github.com/badlogic/pi-mono/pull/456) by [@username](https://github.com/username))`
+- **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/earendil-works/pi-mono/issues/123))`
+- **External contributions**: `Added feature X ([#456](https://github.com/earendil-works/pi-mono/pull/456) by [@username](https://github.com/username))`
 
 ## Adding a New LLM Provider (packages/ai)
 
@@ -155,7 +169,7 @@ Create provider file exporting:
 ### 5. Tests (`packages/ai/test/`)
 
 - Always add the provider to `stream.test.ts` with at least one representative model, even if it reuses an existing API implementation such as `openai-completions`.
-- Add the provider to the broader provider matrix where applicable: `tokens.test.ts`, `abort.test.ts`, `empty.test.ts`, `context-overflow.test.ts`, `image-limits.test.ts`, `unicode-surrogate.test.ts`, `tool-call-without-result.test.ts`, `image-tool-result.test.ts`, `total-tokens.test.ts`, `cross-provider-handoff.test.ts`.
+- Add the provider to the broader provider matrix where applicable: `tokens.test.ts`, `abort.test.ts`, `empty.test.ts`, `context-overflow.test.ts`, `unicode-surrogate.test.ts`, `tool-call-without-result.test.ts`, `image-tool-result.test.ts`, `total-tokens.test.ts`, `cross-provider-handoff.test.ts`.
 - For `cross-provider-handoff.test.ts`, add at least one provider/model pair. If the provider exposes multiple model families (for example GPT and Claude), add at least one pair per family.
 - For non-standard auth, create utility (e.g., `bedrock-utils.ts`) with credential detection.
 
@@ -185,13 +199,32 @@ Create provider file exporting:
 
 1. **Update CHANGELOGs**: Ensure all changes since last release are documented in the `[Unreleased]` section of each affected package's CHANGELOG.md
 
-2. **Run release script**:
+2. **Soft gate: local release smoke test**: Before running the real release script, build an unpublished local release and manually smoke test it from outside the repository so it cannot accidentally resolve workspace files:
+   ```bash
+   npm run release:local -- --out /tmp/pi-local-release --force
+   cd /tmp
+   /tmp/pi-local-release/node/pi --help
+   /tmp/pi-local-release/node/pi --version
+   /tmp/pi-local-release/node/pi
+   /tmp/pi-local-release/bun/pi --help
+   /tmp/pi-local-release/bun/pi --version
+   ```
+   In the interactive smoke test, verify startup, model/account listing, and at least one real prompt with the intended default provider. Treat failures as release blockers unless the user explicitly accepts the risk.
+
+3. **Run release script until npm publish**:
    ```bash
    npm run release:patch    # Fixes and additions
    npm run release:minor    # API breaking changes
    ```
 
-The script handles: version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+   npm publishing requires the maintainer's npm WebAuthn/security-key 2FA and cannot be completed by an agent alone. If the release script stops at `npm publish` with an npm browser authentication URL, the maintainer must run or approve `npm run publish` locally. Do not rerun the version bump.
+
+4. **After publish succeeds, finish release bookkeeping**:
+   - Add fresh `## [Unreleased]` sections to package changelogs.
+   - Commit with `Add [Unreleased] section for next cycle`.
+   - Push `main` and the release tag.
+
+The release script handles the full flow when npm publish auth is already satisfied. If npm requires WebAuthn during publish, continue manually from the existing release commit/tag using the steps above.
 
 ## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
 

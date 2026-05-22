@@ -1,24 +1,24 @@
 import { existsSync } from "node:fs";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import { Container, Text, truncateToWidth } from "@mariozechner/pi-tui";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
-import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.js";
-import { theme } from "../../modes/interactive/theme/theme.js";
-import { waitForChildProcess } from "../../utils/child-process.js";
+import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
+import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
+import { theme } from "../../modes/interactive/theme/theme.ts";
+import { waitForChildProcess } from "../../utils/child-process.ts";
 import {
 	getShellConfig,
 	getShellEnv,
 	killProcessTree,
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
-} from "../../utils/shell.js";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
-import { OutputAccumulator } from "./output-accumulator.js";
-import { getTextOutput, invalidArgText, str } from "./render-utils.js";
-import { wrapToolDefinition } from "./tool-definition-wrapper.js";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.js";
+} from "../../utils/shell.ts";
+import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
+import { OutputAccumulator } from "./output-accumulator.ts";
+import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Bash command to execute" }),
@@ -76,6 +76,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					detached: process.platform !== "win32",
 					env: env ?? getShellEnv(),
 					stdio: ["ignore", "pipe", "pipe"],
+					windowsHide: true,
 				});
 				if (child.pid) trackDetachedChildPid(child.pid);
 				let timedOut = false;
@@ -199,7 +200,15 @@ function rebuildBashResultRenderComponent(
 	const state = component.state;
 	component.clear();
 
-	const output = getTextOutput(result as any, showImages).trim();
+	let output = getTextOutput(result as any, showImages).trim();
+	const truncation = result.details?.truncation;
+	const fullOutputPath = result.details?.fullOutputPath;
+	if (!options.isPartial && truncation?.truncated && fullOutputPath && output.endsWith("]")) {
+		const footerStart = output.lastIndexOf("\n\n[");
+		if (footerStart !== -1 && output.slice(footerStart).includes(fullOutputPath)) {
+			output = output.slice(0, footerStart).trimEnd();
+		}
+	}
 
 	if (output) {
 		const styledOutput = output
@@ -235,8 +244,6 @@ function rebuildBashResultRenderComponent(
 		}
 	}
 
-	const truncation = result.details?.truncation;
-	const fullOutputPath = result.details?.fullOutputPath;
 	if (truncation?.truncated || fullOutputPath) {
 		const warnings: string[] = [];
 		if (fullOutputPath) {
