@@ -1,69 +1,31 @@
+%% 技能系统生命周期
 flowchart TD
-    subgraph Discovery["Skill Discovery"]
-        A[Load Skills Configuration] --> B{Skill Type?}
-        B -->|User Skills| C[~/.pi/skills/]
-        B -->|Project Skills| D[.pi/skills/]
-        B -->|Explicit Paths| E[Custom Paths]
-        C --> F[Scan Directories]
-        D --> F
-        E --> F
+    subgraph "技能发现"
+        S1["~/.pi/agent/skills/"]
+        S2[".pi/skills/"]
+        S3["~/.agents/skills/"]
+        S4["CLI --skills"]
+        S5["扩展 resources_discover"]
     end
 
-    subgraph Scanning["Directory Scanning"]
-        F --> G{Has SKILL.md?}
-        G -->|Yes| H[Load as Single Skill]
-        G -->|No| I[Recurse Subdirectories]
-        I --> J{Has .md Files?}
-        J -->|Yes| K[Load Each .md as Skill]
-        J -->|No| L[Skip Directory]
-        K --> M[Apply .gitignore Rules]
-        H --> M
+    subgraph "系统提示注入"
+        LOAD["loadSkills()"]
+        FORMAT["formatSkillsForPrompt()"]
+        SYSPROMPT["系统提示<br/>Available skills: ..."]
     end
 
-    subgraph Loading["Skill Loading"]
-        M --> N[Parse Frontmatter]
-        N --> O[Extract name & description]
-        O --> P[Validate Name Format]
-        P --> Q{Valid?}
-        Q -->|No| R[Add Diagnostic Warning]
-        Q -->|Yes| S[Check disable-model-invocation]
-        S --> T{Disabled?}
-        T -->|Yes| U[Exclude from Prompt]
-        T -->|No| V[Include in Available Skills]
+    subgraph "技能调用"
+        MODEL_INVOKE["模型决定调用技能"]
+        XML_WRAP["&lt;skill name=... location=...&gt;"]
+        PARSE["parseSkillBlock()"]
+        READ_TOOL["read 工具加载 SKILL.md"]
+        INJECT["技能内容注入上下文"]
     end
 
-    subgraph PromptIntegration["Prompt Integration"]
-        V --> W[Format as XML]
-        W --> X[Add to System Prompt]
-        X --> Y[Agent Can Reference Skills]
+    subgraph "UI 渲染"
+        COMPONENT["SkillInvocationMessageComponent"]
     end
 
-    subgraph Invocation["Skill Invocation"]
-        Y --> Z{Invocation Type?}
-        Z -->|Model Reads| AA[Agent Calls read tool]
-        AA --> AB[Load SKILL.md Content]
-        Z -->|Explicit Command| AC[/skill:name Command]
-        AC --> AD[Directly Load Content]
-        AB --> AE[Apply to Context]
-        AD --> AE
-    end
-
-    subgraph CollisionHandling["Name Collision Handling"]
-        N --> AF{Name Exists?}
-        AF -->|Yes| AG[Resolve by Priority]
-        AG --> AH{User vs Project?}
-        AH -->|User wins| AI[Keep User Skill]
-        AH -->|Project wins| AJ[Keep Project Skill]
-        AH -->|Path loses| AK[Keep First Loaded]
-        AF -->|No| AL[Add to Skill Map]
-    end
-
-    Loading --> CollisionHandling
-    CollisionHandling --> PromptIntegration
-
-    style A fill:#e1f5ff
-    style N fill:#fff4e6
-    style W fill:#f3e5f5
-    style Z fill:#e8f5e9
-    style R fill:#ffebee
-    style AG fill:#fff9c4
+    S1 & S2 & S3 & S4 & S5 --> LOAD --> FORMAT --> SYSPROMPT
+    SYSPROMPT --> MODEL_INVOKE --> XML_WRAP --> PARSE --> READ_TOOL --> INJECT
+    INJECT --> COMPONENT

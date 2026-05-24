@@ -1,449 +1,312 @@
-# 功能地图 (Feature Map)
+# 功能全景图
 
-## 概述
+## 功能总览
 
-本文档提供 pi-coding-agent 的完整功能清单，按功能域分类，并标注功能状态（稳定、实验性、计划中）。
-
----
-
-## 功能分类总览
-
-```
-pi-coding-agent 功能域
-│
-├── 🤖 核心对话
-│   ├── Provider 管理
-│   ├── 模型选择
-│   ├── 流式响应
-│   └── 思考模式
-│
-├── 🛠️ 工具系统
-│   ├── 文件操作
-│   ├── Git 操作
-│   ├── Shell 执行
-│   ├── Web 操作
-│   └── 自定义工具
-│
-├── 💾 会话管理
-│   ├── 持久化
-│   ├── 分支管理
-│   ├── 历史搜索
-│   ├── 导出导入
-│   └── 上下文压缩
-│
-├── 🔌 扩展系统
-│   ├── 工具扩展
-│   ├── Skills
-│   ├── 生命周期钩子
-│   └── UI 扩展
-│
-├── 🎨 UI 定制
-│   ├── 主题系统
-│   ├── 快捷键
-│   ├── 布局定制
-│   └── 组件定制
-│
-├── 👥 团队功能
-│   ├── Slack 集成
-│   ├── Web UI
-│   ├── 会话分享
-│   └── 权限管理
-│
-└── 🔧 开发者功能
-    ├── 事件系统
-    ├── 调试工具
-    ├── 性能监控
-    └── CLI 工具
+```mermaid
+mindmap
+  root((Pi 功能))
+    核心编码
+      文件读取 read
+      命令执行 bash
+      精确编辑 edit
+      文件创建 write
+      代码搜索 grep
+      文件查找 find
+      目录列表 ls
+    多供应商 LLM
+      Anthropic Claude
+      OpenAI GPT/o
+      Google Gemini
+      Mistral
+      Amazon Bedrock
+      DeepSeek
+      xAI Grok
+      30+ 供应商
+    交互界面
+      差分渲染 TUI
+      Markdown 渲染
+      语法高亮
+      内联图片 Kitty
+      多行编辑器
+      自动补全
+    会话管理
+      JSONL 持久化
+      树状分支
+      上下文压缩
+      HTML 导出
+      会话恢复
+    可扩展性
+      TypeScript 扩展
+      自定义工具
+      自定义供应商
+      Slash 命令
+      快捷键注册
+      UI 组件定制
+    多种模式
+      Interactive TUI
+      Print 模式
+      RPC JSON-L
+      SDK 编程接口
+    安全与质量
+      精确版本锁定
+      Shrinkwrap
+      npm audit
+      贡献者门控
 ```
 
----
-
-## 1. 核心对话功能
-
-### 1.1 Provider 管理
-
-| 功能 | 描述 | 状态 | 配置 |
-|------|------|------|------|
-| 多 Provider 支持 | 20+ LLM 供应商 | ✅ 稳定 | `config.provider` |
-| 动态切换 | 运行时切换 Provider | ✅ 稳定 | `/provider <name>` |
-| 统一 API | 一致的调用接口 | ✅ 稳定 | N/A |
-| 懒加载 | 按需加载 Provider | ✅ 稳定 | N/A |
-| 自定义 Provider | 添加私有 Provider | ✅ 稳定 | `registerProvider()` |
-
-**支持的 Provider**：
-- **商业 API**：OpenAI、Anthropic、Google、Mistral、Cohere、Groq
-- **本地/自托管**：Ollama、LocalAI、LM Studio
-- **云服务**：AWS Bedrock、Azure OpenAI、Google Cloud AI
-- **专业服务**：Perplexity、Replicate、Together AI
-
-### 1.2 模型管理
-
-| 功能 | 描述 | 状态 | 配置 |
-|------|------|------|------|
-| 模型注册表 | 700+ 预配置模型 | ✅ 稳定 | N/A |
-| 模型选择 | 选择特定模型 | ✅ 稳定 | `/model <name>` |
-| 模型别名 | 自定义模型别名 | ✅ 稳定 | `config.modelAliases` |
-| 模型比较 | 对比模型输出 | 🚧 实验性 | N/A |
-| 成本追踪 | 追踪 API 成本 | 📋 计划中 | N/A |
-
-### 1.3 对话特性
-
-| 功能 | 描述 | 状态 | 触发方式 |
-|------|------|------|----------|
-| 流式响应 | 实时显示生成内容 | ✅ 稳定 | 默认启用 |
-| 思考模式 | 显示推理过程 | ✅ 稳定 | `thinking: true` |
-| 工具调用 | LLM 调用工具 | ✅ 稳定 | 自动 |
-| 多轮对话 | 保持上下文 | ✅ 稳定 | 默认 |
-| 系统提示 | 自定义系统提示 | ✅ 稳定 | `config.systemPrompt` |
-| 温度控制 | 控制随机性 | ✅ 稳定 | `temperature: 0-2` |
-| 停止序列 | 自定义停止词 | ✅ 稳定 | `stopSequences: []` |
-
----
-
-## 2. 工具系统
-
-### 2.1 内置工具
-
-#### 文件操作工具
-
-| 工具 | 描述 | 参数 | 状态 |
-|------|------|------|------|
-| `Read` | 读取文件内容 | `filePath` | ✅ 稳定 |
-| `Write` | 写入文件 | `filePath`, `content` | ✅ 稳定 |
-| `Edit` | 编辑文件部分 | `filePath`, `oldText`, `newText` | ✅ 稳定 |
-| `Search` | 搜索文件内容 | `pattern`, `path` | ✅ 稳定 |
-| `List` | 列出目录 | `path` | ✅ 稳定 |
-
-#### Git 工具
-
-| 工具 | 描述 | 参数 | 状态 |
-|------|------|------|------|
-| `GitStatus` | 查看状态 | N/A | ✅ 稳定 |
-| `GitDiff` | 查看差异 | `file?` | ✅ 稳定 |
-| `GitCommit` | 提交更改 | `message` | ✅ 稳定 |
-| `GitPush` | 推送更改 | `remote?`, `branch?` | ✅ 稳定 |
-| `GitBranch` | 管理分支 | `name`, `action` | ✅ 稳定 |
-
-#### Shell 工具
-
-| 工具 | 描述 | 参数 | 状态 |
-|------|------|------|------|
-| `Bash` | 执行 Shell 命令 | `command`, `cwd?` | ✅ 稳定 |
-| `Cd` | 切换目录 | `path` | ✅ 稳定 |
-| `Pwd` | 当前目录 | N/A | ✅ 稳定 |
-
-#### Web 工具
-
-| 工具 | 描述 | 参数 | 状态 |
-|------|------|------|------|
-| `WebSearch` | Web 搜索 | `query` | ✅ 稳定 |
-| `Fetch` | 获取 URL | `url` | ✅ 稳定 |
-| `WebRead` | 读取网页 | `url` | ✅ 稳定 |
-
-### 2.2 自定义工具
-
-| 功能 | 描述 | 状态 | API |
-|------|------|------|-----|
-| 工具定义 | 定义自定义工具 | ✅ 稳定 | `Tool` 接口 |
-| 参数验证 | JSON Schema 验证 | ✅ 稳定 | `ToolParameterSchema` |
-| 权限控制 | 工具权限检查 | ✅ 稳定 | `ToolPermission` |
-| 工具组合 | 组合多个工具 | ✅ 稳定 | `CompositeTool` |
-| 工具注册表 | 动态注册工具 | ✅ 稳定 | `ToolRegistry` |
-
----
-
-## 3. 会话管理
-
-### 3.1 持久化
-
-| 功能 | 描述 | 状态 | 存储 |
-|------|------|------|------|
-| 自动保存 | 每条消息自动保存 | ✅ 稳定 | JSONL |
-| 手动保存 | 显式保存会话 | ✅ 稳定 | `/save` |
-| 会话恢复 | 恢复历史会话 | ✅ 稳定 | `/load` |
-| 会话列表 | 查看所有会话 | ✅ 稳定 | `/list` |
-| 会话删除 | 删除会话 | ✅ 稳定 | `/delete` |
-
-**存储位置**：
-- Linux: `~/.pi/sessions/`
-- macOS: `~/Library/Application Support/pi/sessions/`
-- Windows: `%APPDATA%/pi/sessions/`
-
-### 3.2 分支管理
-
-| 功能 | 描述 | 状态 | 触发方式 |
-|------|------|------|----------|
-| 创建分支 | 从当前点创建分支 | ✅ 稳定 | `Ctrl+B` |
-| 切换分支 | 跳转到其他分支 | ✅ 稳定 | `/branch <name>` |
-| 合并分支 | 合并分支到主线 | 🚧 实验性 | `/merge` |
-| 删除分支 | 删除分支 | ✅ 稳定 | `/branch-delete` |
-| 分支树 | 可视化分支结构 | ✅ 稳定 | `/tree` |
-
-### 3.3 搜索与导航
-
-| 功能 | 描述 | 状态 | 命令 |
-|------|------|------|------|
-| 全文搜索 | 搜索所有会话 | ✅ 稳定 | `/search <query>` |
-| 会话过滤 | 按条件过滤 | ✅ 稳定 | `/filter <condition>` |
-| 时间跳转 | 跳转到特定时间 | ✅ 稳定 | `/goto <time>` |
-| 标签管理 | 为会话添加标签 | 📋 计划中 | `/tag` |
-
-### 3.4 导入导出
-
-| 功能 | 描述 | 状态 | 格式 |
-|------|------|------|------|
-| 导出 Markdown | 导出为 MD | ✅ 稳定 | `.md` |
-| 导出 HTML | 导出为 HTML | ✅ 稳定 | `.html` |
-| 导出 JSON | 导出为 JSON | ✅ 稳定 | `.json` |
-| 导入对话 | 导入外部对话 | 📋 计划中 | N/A |
-| 分享链接 | 生成分享链接 | 🚧 实验性 | N/A |
-
-### 3.5 上下文压缩
-
-| 功能 | 描述 | 状态 | 配置 |
-|------|------|------|------|
-| 自动压缩 | 超过阈值自动压缩 | ✅ 稳定 | `compaction.threshold` |
-| 手动压缩 | 手动触发压缩 | ✅ 稳定 | `/compact` |
-| 智能摘要 | LLM 生成摘要 | ✅ 稳定 | N/A |
-| 文件操作追踪 | 跨压缩追踪操作 | ✅ 稳定 | N/A |
-| 分支摘要 | 压缩非活跃分支 | ✅ 稳定 | N/A |
-
----
-
-## 4. 扩展系统
-
-### 4.1 扩展类型
-
-| 类型 | 描述 | 状态 | 示例 |
-|------|------|------|------|
-| 工具扩展 | 添加新工具 | ✅ 稳定 | Browser Extension |
-| Skills 扩展 | 添加技能 | ✅ 稳定 | Code Review Skill |
-| UI 扩展 | 添加 UI 组件 | ✅ 稳定 | Custom Panel |
-| Provider 扩展 | 添加 LLM Provider | ✅ 稳定 | Custom LLM |
-| 主题扩展 | 自定义主题 | ✅ 稳定 | Custom Theme |
-
-### 4.2 生命周期钩子
-
-| 钩子 | 描述 | 状态 | 用途 |
-|------|------|------|------|
-| `onLoad` | 扩展加载时 | ✅ 稳定 | 初始化 |
-| `onUnload` | 扩展卸载时 | ✅ 稳定 | 清理资源 |
-| `onMessage` | 收到消息时 | ✅ 稳定 | 消息处理 |
-| `onToolCall` | 工具调用前后 | ✅ 稳定 | 日志、修改 |
-| `onCompaction` | 上下文压缩时 | ✅ 稳定 | 自定义压缩 |
-
-### 4.3 扩展管理
-
-| 功能 | 描述 | 状态 | 命令 |
-|------|------|------|------|
-| 安装扩展 | 安装扩展包 | ✅ 稳定 | `/ext install <name>` |
-| 卸载扩展 | 卸载扩展 | ✅ 稳定 | `/ext uninstall <name>` |
-| 启用/禁用 | 切换扩展状态 | ✅ 稳定 | `/ext enable/disable` |
-| 更新扩展 | 更新扩展版本 | 📋 计划中 | `/ext update` |
-| 列出扩展 | 查看已安装扩展 | ✅ 稳定 | `/ext list` |
-
----
-
-## 5. UI 定制
-
-### 5.1 主题系统
-
-| 功能 | 描述 | 状态 | 配置 |
-|------|------|------|------|
-| 内置主题 | 多种预设主题 | ✅ 稳定 | `theme` |
-| 自定义主题 | JSON 定义主题 | ✅ 稳定 | `~/.pi/themes/` |
-| 颜色模式 | truecolor/256color | ✅ 稳定 | 自动检测 |
-| 语法高亮 | 代码语法高亮 | ✅ 稳定 | cli-highlight |
-| 热重载 | 主题更改实时生效 | ✅ 稳定 | 自动 |
-
-**内置主题**：
-- `default` - 默认主题
-- `dark` - 深色主题
-- `light` - 浅色主题
-- `monokai` - Monokai 风格
-- `nord` - Nord 风格
-- `dracula` - Dracula 风格
-
-### 5.2 快捷键系统
-
-| 功能 | 描述 | 状态 | 配置 |
-|------|------|------|------|
-| 默认快捷键 | 预定义快捷键 | ✅ 稳定 | `keybindings.json` |
-| 自定义快捷键 | 修改快捷键 | ✅ 稳定 | 同上 |
-| 模式支持 | Normal/Insert 模式 | ✅ 稳定 | 自动 |
-| Kitty 协议 | 现代终端支持 | ✅ 稳定 | 自动 |
-| 冲突检测 | 检测快捷键冲突 | ✅ 稳定 | 启动时 |
-
-**常用快捷键**：
-- `Ctrl+C` - 取消当前操作
-- `Ctrl+D` - 退出
-- `Ctrl+B` - 创建分支
-- `Ctrl+T` - 显示会话树
-- `Ctrl+F` - 搜索
-- `?` - 帮助
-
-### 5.3 布局定制
-
-| 功能 | 描述 | 状态 |
-|------|------|------|
-| 窗口大小调整 | 调整 UI 尺寸 | ✅ 稳定 |
-| 面板布局 | 自定义面板排列 | 📋 计划中 |
-| 字体设置 | 调整字体大小 | ✅ 稳定 |
-| 间距设置 | 调整行/列间距 | ✅ 稳定 |
-
----
-
-## 6. 团队功能
-
-### 6.1 Slack 集成 (pi-mom)
-
-| 功能 | 描述 | 状态 |
-|------|------|------|
-| 频道集成 | 在 Slack 中对话 | ✅ 稳定 |
-| 工具调用 | 调用 pi 工具 | ✅ 稳定 |
-| 代码执行 | 执行代码块 | ✅ 稳定 |
-| 文件操作 | 读写文件 | ✅ 稳定 |
-| 权限控制 | 频道级权限 | 🚧 实验性 |
-
-### 6.2 Web UI
-
-| 功能 | 描述 | 状态 |
-|------|------|------|
-| 聊天界面 | Web 聊天组件 | ✅ 稳定 |
-| 流式响应 | 实时显示响应 | ✅ 稳定 |
-| 代码高亮 | 代码语法高亮 | ✅ 稳定 |
-| 嵌入支持 | 可嵌入现有应用 | ✅ 稳定 |
-| 多会话 | 支持多个会话 | 📋 计划中 |
-
-### 6.3 协作功能
-
-| 功能 | 描述 | 状态 |
-|------|------|------|
-| 会话分享 | 分享对话链接 | 🚧 实验性 |
-| 协作编辑 | 多人编辑文件 | 📋 计划中 |
-| 评论系统 | 对话添加评论 | 📋 计划中 |
-| 权限管理 | 用户权限控制 | 📋 计划中 |
-
----
-
-## 7. 开发者功能
-
-### 7.1 事件系统
-
-| 事件 | 描述 | 状态 |
-|------|------|------|
-| `start` | Agent 启动 | ✅ 稳定 |
-| `message` | 收到消息 | ✅ 稳定 |
-| `tool_call` | 工具调用 | ✅ 稳定 |
-| `response` | LLM 响应 | ✅ 稳定 |
-| `error` | 错误发生 | ✅ 稳定 |
-| `complete` | 任务完成 | ✅ 稳定 |
-| `compaction` | 上下文压缩 | ✅ 稳定 |
-
-### 7.2 调试工具
-
-| 功能 | 描述 | 状态 |
-|------|------|------|
-| 调试模式 | 详细日志输出 | ✅ 稳定 |
-| 事件追踪 | 追踪所有事件 | ✅ 稳定 |
-| 工具调用日志 | 记录工具调用 | ✅ 稳定 |
-| 性能分析 | 分析性能瓶颈 | 🚧 实验性 |
-| 内存分析 | 内存使用分析 | 📋 计划中 |
-
-### 7.3 CLI 工具
-
-| 命令 | 描述 | 状态 |
-|------|------|------|
-| `pi` | 启动交互式会话 | ✅ 稳定 |
-| `pi --help` | 显示帮助 | ✅ 稳定 |
-| `pi --version` | 显示版本 | ✅ 稳定 |
-| `pi --config` | 显示配置 | ✅ 稳定 |
-| `pi --debug` | 调试模式 | ✅ 稳定 |
-
----
-
-## 8. 实验性功能
-
-| 功能 | 描述 | 状态 |
-|------|------|------|
-| 多模态输入 | 图像/音频输入 | 🚧 实验性 |
-| 语音交互 | 语音输入输出 | 📋 计划中 |
-| 实时协作 | 多人实时编辑 | 🚧 实验性 |
-| AI Agent 市场 | 扩展市场 | 📋 计划中 |
-| 成本优化 | 自动优化 API 成本 | 🚧 实验性 |
-
----
-
-## 功能对比表
-
-### 与竞品功能对比
-
-| 功能 | pi | Cursor | Claude Code | Copilot |
-|------|-----|--------|-------------|---------|
-| 多 Provider | ✅ 20+ | ❌ | ❌ | ❌ |
-| 本地模型 | ✅ | ❌ | ❌ | ❌ |
-| 扩展系统 | ✅ | 🔄 | ❌ | ❌ |
-| 会话分支 | ✅ | ✅ | ❌ | ❌ |
-| 上下文压缩 | ✅ | ✅ | ✅ | ❌ |
-| 终端 UI | ✅ | ❌ | ✅ | ❌ |
-| Web UI | ✅ | ✅ | ❌ | ❌ |
-| Slack 集成 | ✅ | ❌ | ❌ | ❌ |
-| 自托管 | ✅ | ❌ | ❌ | ❌ |
-| 开源 | ✅ | ❌ | 🔄 | ❌ |
-
----
-
-## 功能路线图
-
-### Q2 2026 (当前)
-
-- ✅ Provider 系统完善
-- ✅ 扩展系统稳定
-- ✅ 会话管理优化
-- 🚧 性能提升
-
-### Q3 2026
-
-- 📋 更多内置扩展
-- 📋 Web UI 增强
-- 📋 移动端支持
-- 📋 团队协作功能
-
-### Q4 2026
-
-- 📋 GUI 应用
-- 📋 AI Agent 市场
-- 📋 企业级功能
-- 📋 云服务版本
-
----
-
-## 总结
-
-pi-coding-agent 提供了：
-
-**核心优势**：
-- ✅ 最多的 Provider 支持
-- ✅ 最完整的扩展系统
-- ✅ 最灵活的会话管理
-- ✅ 唯一的分支功能
-- ✅ 完全开源可自托管
-
-**适用场景**：
-- 个人开发者
-- 开源项目
-- 技术团队
-- Agent 开发
-
-**限制**：
-- 需要命令行熟悉度
-- 需要技术背景配置
-- 企业功能仍在发展中
-
----
-
-## 相关链接
-
-- **产品全景**：`/LEARN/01-product/01-product-overview.md`
-- **用户旅程**：`/LEARN/01-product/02-user-journey.md`
-- **架构概览**：`/LEARN/02-architecture/01-architecture-overview.md`
+## 按领域分类
+
+### 一、LLM 集成
+
+#### 支持的 API 协议（9 种）
+
+| API 协议 | 对应供应商 | 特性 |
+|----------|-----------|------|
+| `anthropic-messages` | Anthropic, Fireworks | 流式工具调用, 扩展思考 |
+| `openai-completions` | OpenAI, OpenRouter, DeepSeek, Groq, xAI | 最广泛兼容 |
+| `openai-responses` | OpenAI 原生 | Responses API |
+| `openai-codex-responses` | OpenAI Codex | 云端沙箱执行 |
+| `azure-openai-responses` | Azure OpenAI | 企业级 |
+| `google-generative-ai` | Google AI Studio | Gemini 系列 |
+| `google-vertex` | Google Cloud Vertex | 企业级 |
+| `mistral-conversations` | Mistral AI | Mistral 系列 |
+| `bedrock-converse-stream` | AWS Bedrock | 多模型接入 |
+
+#### 支持的供应商（30+）
+
+```mermaid
+graph TB
+    subgraph 一线供应商
+        A1["Anthropic"]
+        A2["OpenAI"]
+        A3["Google"]
+        A4["Mistral"]
+    end
+
+    subgraph 云平台
+        B1["Amazon Bedrock"]
+        B2["Azure OpenAI"]
+        B3["Google Vertex"]
+    end
+
+    subgraph 聚合平台
+        C1["OpenRouter"]
+        C2["Vercel AI Gateway"]
+        C3["Cloudflare"]
+        C4["Fireworks"]
+        C5["Together"]
+    end
+
+    subgraph 专业供应商
+        D1["DeepSeek"]
+        D2["xAI / Grok"]
+        D3["Groq"]
+        D4["Cerebras"]
+        D5["HuggingFace"]
+        D6["Kimi Coding"]
+    end
+
+    subgraph 区域供应商
+        E1["MiniMax"]
+        E2["Moonshot AI"]
+        E3["Xiaomi"]
+    end
+```
+
+#### 模型能力
+
+| 能力 | 说明 |
+|------|------|
+| 工具调用 | 所有模型必须支持（入选门槛） |
+| 推理思考 | 可调节 minimal/low/medium/high/xhigh |
+| 图片输入 | 支持视觉理解的模型 |
+| 提示缓存 | 减少重复 token 成本 |
+| Token 追踪 | 输入/输出/缓存 token 计数和成本 |
+| 跨供应商切换 | 同会话内切换，自动消息格式转换 |
+
+### 二、工具系统
+
+```mermaid
+graph TB
+    subgraph 默认启用
+        R["read<br/>读取文件"]
+        B["bash<br/>执行命令"]
+        E["edit<br/>编辑文件"]
+        W["write<br/>创建文件"]
+    end
+
+    subgraph 可选启用
+        G["grep<br/>正则搜索"]
+        F["find<br/>文件查找"]
+        L["ls<br/>目录列表"]
+    end
+
+    subgraph 扩展工具
+        X["自定义工具<br/>via registerTool()"]
+    end
+
+    style R fill:#c8e6c9
+    style B fill:#c8e6c9
+    style E fill:#c8e6c9
+    style W fill:#c8e6c9
+    style G fill:#fff9c4
+    style F fill:#fff9c4
+    style L fill:#fff9c4
+    style X fill:#e1f5fe
+```
+
+#### 工具详情
+
+| 工具 | 参数 | 输出 | 安全控制 |
+|------|------|------|---------|
+| `read` | `file_path`, `offset`, `limit` | 文件内容（含行号） | 路径验证 |
+| `bash` | `command`, `timeout`, `description` | stdout/stderr | spawn hook, 超时 |
+| `edit` | `file_path`, `old_string`, `new_string` | diff 预览 | 文件锁队列 |
+| `write` | `file_path`, `content` | 成功/失败 | 文件锁队列 |
+| `grep` | `pattern`, `path`, `include` | 匹配行和上下文 | 路径限制 |
+| `find` | `pattern`, `path`, `type` | 文件路径列表 | 路径限制 |
+| `ls` | `path`, `ignore` | 目录树 | 路径限制 |
+
+### 三、会话管理
+
+```mermaid
+graph TB
+    subgraph 会话树
+        Root["会话根节点"]
+        M1["用户消息 1"]
+        A1["助手回复 1"]
+        M2["用户消息 2"]
+        A2["助手回复 2"]
+        Fork["分支点"]
+        B1["分支 A"]
+        B2["分支 B"]
+        Comp["压缩节点"]
+
+        Root --> M1 --> A1 --> M2 --> A2
+        A2 --> Fork
+        Fork --> B1
+        Fork --> B2
+        A1 --> Comp
+    end
+
+    subgraph 操作
+        Create["创建会话"]
+        Resume["恢复会话"]
+        ForkOp["分支 fork"]
+        Nav["树导航"]
+        Compact["压缩"]
+        Export["HTML 导出"]
+    end
+```
+
+#### 会话条目类型
+
+| 类型 | 说明 | 在 LLM 上下文中 |
+|------|------|-----------------|
+| `message` | 用户/助手/工具结果消息 | 是 |
+| `model_change` | 模型切换记录 | 否（元数据） |
+| `thinking_level_change` | 思考级别变更 | 否（元数据） |
+| `compaction` | 上下文压缩摘要 | 是（替换旧消息） |
+| `branch_summary` | 分支摘要 | 是（注入上下文） |
+| `custom` | 扩展自定义数据 | 否 |
+| `custom_message` | 扩展注入的上下文 | 是 |
+| `label` | 用户标记 | 否 |
+| `session_info` | 会话元数据 | 否 |
+
+### 四、扩展系统
+
+```mermaid
+graph TB
+    subgraph 扩展能力
+        EV["事件订阅<br/>30+ 事件类型"]
+        TL["注册工具"]
+        CM["Slash 命令"]
+        SC["快捷键"]
+        UI["UI 组件"]
+        PR["自定义供应商"]
+        AC["自动补全"]
+        ED["自定义编辑器"]
+    end
+
+    subgraph 事件生命周期
+        SS["session_start"]
+        BA["before_agent_start"]
+        AS["agent_start"]
+        TS["turn_start"]
+        TC["tool_call"]
+        TR["tool_result"]
+        TE["turn_end"]
+        AE["agent_end"]
+        SD["session_shutdown"]
+    end
+
+    SS --> BA --> AS --> TS --> TC --> TR --> TE --> AE --> SD
+```
+
+#### 扩展发现路径
+
+| 路径 | 优先级 | 说明 |
+|------|--------|------|
+| CLI `--extensions` | 最高 | 命令行指定 |
+| `.pi/extensions/` | 项目级 | 项目内扩展 |
+| `~/.pi/agent/extensions/` | 用户级 | 全局扩展 |
+| settings `extensions[]` | 配置级 | 设置文件引用 |
+
+### 五、技能系统
+
+```mermaid
+flowchart TD
+    A["Agent 发现需要技能"] --> B["读取 SKILL.md"]
+    B --> C["注入技能内容<br/>到用户消息"]
+    C --> D["Agent 按技能指引行动"]
+
+    E["技能发现路径"]
+    E --> F["~/.pi/agent/skills/"]
+    E --> G[".pi/skills/"]
+    E --> H["~/.agents/skills/"]
+    E --> I["扩展动态添加"]
+```
+
+### 六、配置系统
+
+```mermaid
+graph TB
+    subgraph 配置层次
+        G["全局配置<br/>~/.pi/agent/"]
+        P["项目配置<br/>.pi/"]
+        C["CLI 参数"]
+        E["环境变量"]
+    end
+
+    E --> C --> P --> G
+
+    subgraph 配置文件
+        S["settings.json"]
+        A["auth.json"]
+        M["models.json"]
+        K["keybindings.json"]
+        T["themes/*.json"]
+    end
+```
+
+| 配置项 | 全局 | 项目 | CLI | 说明 |
+|--------|------|------|-----|------|
+| 默认模型 | `settings.json` | `settings.json` | `--model` | 启动时使用的模型 |
+| API Key | `auth.json` / 环境变量 | - | `--api-key` | LLM 认证 |
+| 主题 | `settings.json` | `settings.json` | - | UI 主题 |
+| 快捷键 | `keybindings.json` | - | - | 键绑定覆盖 |
+| 扩展 | `settings.json` | `settings.json` | `--extensions` | 扩展列表 |
+| 工具 | - | - | `--tools` | 启用的工具 |
+| 思考级别 | `settings.json` | - | `--thinking` | 默认推理级别 |
+
+### 七、安全特性
+
+| 特性 | 实现 |
+|------|------|
+| 精确依赖版本 | `save-exact=true` + 手动 review |
+| Shrinkwrap | 发布包锁定完整依赖树 |
+| npm audit | 定时 CI 扫描 |
+| 贡献者门控 | 新贡献者 issue/PR 自动关闭 |
+| 生命周期脚本 | `--ignore-scripts` 默认 |
+| 最小发布龄期 | `min-release-age=2` |
+| Lockfile 提交保护 | 预提交钩子检查 |

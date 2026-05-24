@@ -1,64 +1,37 @@
-
+%% 扩展系统生命周期
 flowchart TD
-    subgraph Discovery["Extension Discovery"]
-        A[Load Extensions] --> B{Extension Path Type}
-        B -->|Configured Path| C[Direct Load]
-        B -->|Directory| D[Discover Files]
-        D --> E[Check package.json pi field]
-        E -->|Has pi field| F[Load Declared Paths]
-        E -->|No pi field| G[Check index.ts/js]
-        G -->|Has index| F
-        G -->|No index| H[Scan *.ts/*.js Files]
+    subgraph "发现阶段"
+        D1[".pi/extensions/"]
+        D2["~/.pi/agent/extensions/"]
+        D3["settings.extensions[]"]
+        D4["CLI --extensions"]
     end
 
-    subgraph Loading["Extension Loading"]
-        C --> I[Create Extension Runtime]
-        F --> I
-        H --> I
-        I --> J[Create ExtensionAPI]
-        J --> K[Call Factory Function]
-        K --> L[Collect Registrations]
+    subgraph "加载阶段"
+        JITI["jiti 加载 .ts 模块"]
+        FACTORY["执行 ExtensionFactory(pi)"]
+        REG_HANDLERS["pi.on() 注册事件"]
+        REG_TOOLS["pi.registerTool() 注册工具"]
+        REG_CMDS["pi.registerCommand() 注册命令"]
+        REG_PROV["pi.registerProvider() 注册供应商"]
+        REG_SC["pi.registerShortcut() 注册快捷键"]
     end
 
-    subgraph Binding["Core Binding"]
-        L --> M[Runner.bindCore]
-        M --> N[Bind Actions to Runtime]
-        N --> O[Flush Provider Registrations]
-        O --> P[Enable Runtime Actions]
+    subgraph "运行阶段"
+        DISPATCH["ExtensionRunner.dispatch(event)"]
+        HANDLERS["遍历所有 handler"]
+        MERGE_RESULT["合并结果"]
+        ACTIONS["执行 pi.sendMessage/sendUserMessage"]
     end
 
-    subgraph Execution["Event Execution"]
-        P --> Q[Emit Event]
-        Q --> R[Create ExtensionContext]
-        R --> S[Iterate Extensions]
-        S --> T[Execute Handlers]
-        T --> U{Result Type?}
-        U -->|Cancel/Block| V[Stop Processing]
-        U -->|Modify| W[Update Event Data]
-        U -->|Normal| X[Continue Next Handler]
-        W --> S
-        X --> S
+    subgraph "卸载阶段"
+        SHUTDOWN["session_shutdown 事件"]
+        INVALIDATE["invalidate() 标记过期"]
+        CLEANUP["清理资源"]
     end
 
-    subgraph Lifecycle["Lifecycle Events"]
-        S1[session_start] --> S2[before_agent_start]
-        S2 --> S3[agent_start]
-        S3 --> S4[turn_start]
-        S4 --> S5[message_start]
-        S5 --> S6[message_update]
-        S6 --> S7[message_end]
-        S7 --> S8[tool_call]
-        S8 --> S9[tool_result]
-        S9 --> S10[turn_end]
-        S10 --> S11[agent_end]
-        S11 --> S12[session_shutdown]
-    end
-
-    Execution --> Lifecycle
-
-    style A fill:#e1f5ff
-    style K fill:#fff4e6
-    style M fill:#f3e5f5
-    style Q fill:#e8f5e9
-    style V fill:#ffebee
-    style W fill:#fff9c4
+    D1 & D2 & D3 & D4 --> JITI --> FACTORY
+    FACTORY --> REG_HANDLERS & REG_TOOLS & REG_CMDS & REG_PROV & REG_SC
+    REG_HANDLERS --> DISPATCH --> HANDLERS --> MERGE_RESULT
+    DISPATCH --> ACTIONS
+    SHUTDOWN --> INVALIDATE --> CLEANUP

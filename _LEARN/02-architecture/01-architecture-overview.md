@@ -1,525 +1,277 @@
-# 宏观架构与分层设计
+# 整体架构与分层设计
 
-> 理解 pi-mono 的四层架构模型和核心设计决策
+## 架构总览
 
----
-
-## 1. 架构概览
-
-### 1.1 四层架构模型
-
-pi-mono 采用清晰的分层架构，从底层到上层分为四层：
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    L4: Presentation Layer                        │
-│                 (pi-tui, pi-web-ui)                              │
-│                    终端 UI / Web 组件                              │
-├─────────────────────────────────────────────────────────────────┤
-│                    L3: Application Layer                         │
-│          (pi-coding-agent, pi-mom, pi-pods)                      │
-│              具体应用：编程助手、Slack 机器人、Pod 管理              │
-├─────────────────────────────────────────────────────────────────┤
-│                    L2: Runtime Layer                             │
-│                   (pi-agent-core)                                │
-│               Agent 运行时：循环、状态、工具执行                       │
-├─────────────────────────────────────────────────────────────────┤
-│                    L1: Provider Layer                            │
-│                      (pi-ai)                                     │
-│              统一 LLM API：20+ Provider 抽象                         │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-                   External LLM Providers
-              (OpenAI, Anthropic, Google, ...)
-```
-
-### 1.2 层次职责
-
-| 层次 | 包 | 职责 | 依赖 |
-|------|-----|------|------|
-| **L1** | pi-ai | 统一 LLM 调用抽象、Provider 注册、流式响应 | 无 |
-| **L2** | pi-agent-core | Agent Loop、状态管理、工具执行框架 | pi-ai |
-| **L3** | pi-coding-agent, pi-mom, pi-pods | 具体应用逻辑、会话管理、扩展加载 | pi-agent-core, pi-ai, pi-tui |
-| **L4** | pi-tui, pi-web-ui | UI 渲染、组件库、交互处理 | 无 (pi-tui 无外部依赖) |
-
-### 1.3 依赖方向
-
-**严格单向依赖**：
-- L4 → L3 → L2 → L1
-- 禁止反向依赖
-- 通过接口和事件机制解耦
-
----
-
-## 2. 核心设计决策
-
-### 2.1 Provider 注册表模式
-
-**问题**：20+ LLM Provider API 差异大，如何统一？
-
-**解决方案**：Provider 注册表 + 懒加载
-
-```typescript
-// 1. 定义统一接口
-interface ApiProvider<TApi extends Api> {
-    api: TApi;
-    stream: StreamFunction<TApi>;
-    streamSimple: StreamFunction<TApi>;
-}
-
-// 2. 注册 Provider
-registerApiProvider("openai", {
-    api: "openai-completions",
-    stream: (model, messages, options) => { /* ... */ },
-    streamSimple: (model, messages, options) => { /* ... */ }
-});
-
-// 3. 懒加载：仅在需要时加载 Provider 代码
-createLazyStream("anthropic", () => import("./providers/anthropic"));
-```
-
-**源文件**：
-- `/packages/ai/src/api-registry.ts` - 注册表实现
-- `/packages/ai/src/providers/register-builtins.ts` - 懒加载注册
-
-**优势**：
-- 统一调用接口：`streamSimple(model, messages, options)`
-- 按需加载：不使用的 Provider 不加载代码
-- 动态注册：扩展可运行时注册新 Provider
-
-### 2.2 Agent Loop 双层循环
-
-**问题**：Agent 需要处理工具调用和 follow-up 消息，如何组织？
-
-**解决方案**：双层 Agent Loop
-
-```typescript
-// 外层循环：处理 follow-up 消息
-while (true) {
-    // 内层循环：流式响应 + 工具执行
-    while (true) {
-        // 1. 流式获取 Assistant 响应
-        for await (const event of streamAssistantResponse()) {
-            // 2. 检查是否有工具调用
-            if (event.type === "toolcall_delta") {
-                // 3. 执行工具
-                await executeTools(toolCalls);
-                // 4. 继续内层循环，将结果发回 LLM
-                continue;
-            }
-        }
-
-        // 5. 无更多工具调用，退出内层
-        break;
-    }
-
-    // 6. 检查是否有 follow-up 消息
-    const followUps = getFollowUpMessages();
-    if (!followUps.length) break;
-
-    // 7. 将 follow-up 加入消息队列，继续外层
-    context.messages.push(...followUps);
-}
-```
-
-**源文件**：
-- `/packages/agent/src/agent-loop.ts` - Agent Loop 实现
-
-**关键点**：
-- **内层**：处理单次 LLM 响应和工具调用
-- **外层**：处理多轮对话的 follow-up 消息
-- **消息转换边界**：仅在 LLM 调用时转换 `AgentMessage[] → Message[]`
-
-### 2.3 事件驱动解耦
-
-**问题**：扩展如何监听和响应 Agent 状态变化？
-
-**解决方案**：三层事件系统
-
-**Layer 1: AgentEvent**（pi-agent-core）
-```typescript
-type AgentEvent =
-    | AgentStartEvent
-    | TurnStartEvent
-    | MessageStartEvent
-    | ToolExecutionStartEvent
-    | // ... 更多事件
-```
-
-**Layer 2: ExtensionEvent**（pi-coding-agent）
-```typescript
-type ExtensionEvent =
-    | SessionStartEvent
-    | ToolCallEvent
-    | InputEvent
-    | ContextEvent
-    | // ... 30+ 事件类型
-```
-
-**Layer 3: EventBus**（跨扩展通信）
-```typescript
-eventBus.emit("custom-event", data);
-eventBus.on("custom-event", (data) => { /* ... */ });
-```
-
-**源文件**：
-- `/packages/agent/src/types.ts` - AgentEvent 定义
-- `/packages/coding-agent/src/core/extensions/types.ts` - ExtensionEvent 定义
-- `/packages/coding-agent/src/core/event-bus.ts` - EventBus 实现
-
-### 2.4 扩展点设计
-
-**问题**：如何让扩展在不修改核心代码的情况下增强功能？
-
-**解决方案**：声明合并 + 接口注入
-
-**示例：自定义工具**
-```typescript
-// 扩展代码
-export default function (api: ExtensionAPI) {
-    api.registerTool({
-        name: "my-tool",
-        description: "My custom tool",
-        parameters: Type.Object({
-            input: Type.String()
-        }),
-        execute: async (toolCallId, params, signal, onUpdate) => {
-            return { result: "done" };
-        }
-    });
-}
-```
-
-**扩展点清单**：
-- 事件订阅（30+ 事件）
-- 工具注册
-- 命令注册
-- 快捷键注册
-- Provider 注册
-- UI 组件注册
-
-### 2.5 类型安全优先
-
-**问题**：如何在跨 Provider 的情况下保持类型安全？
-
-**解决方案**：泛型传递 + TypeBox
-
-**泛型链**：
-```typescript
-Model<TApi> → AgentTool<TParameters> → ToolDefinition<TParams, TDetails, TState>
-```
-
-**TypeBox 双重用途**：
-```typescript
-const schema = Type.Object({
-    path: Type.String(),
-    line: Type.Optional(Type.Number())
-});
-
-// 1. 运行时验证
-const validated = Value.Parse(schema, input);
-
-// 2. 推导 TypeScript 类型
-type Params = Static<typeof schema>;
-// { path: string; line?: number }
-```
-
-**源文件**：
-- `/packages/ai/src/types.ts` - 泛型定义
-- `/packages/ai/src/utils/typebox-helpers.ts` - TypeBox 工具
-
----
-
-## 3. 架构图
+Pi 采用**四层分离架构**，从底层到顶层依次为：LLM 抽象层 → Agent 运行时 → 编码智能体 → 终端 UI。
 
 ```mermaid
 graph TB
-    subgraph "L4: Presentation Layer"
-        TUI[pi-tui<br>Terminal UI]
-        WUI[pi-web-ui<br>Web Components]
+    subgraph "Layer 4: 交互层"
+        TUI["pi-tui<br/>差分渲染终端 UI"]
+        INT["Interactive 模式"]
+        PRINT["Print 模式"]
+        RPC["RPC 模式"]
     end
 
-    subgraph "L3: Application Layer"
-        CA[pi-coding-agent<br>Coding Agent CLI]
-        MOM[pi-mom<br>Slack Bot]
-        PODS[pi-pods<br>GPU Manager]
+    subgraph "Layer 3: 应用层"
+        CA["pi-coding-agent"]
+        CLI["CLI 解析 + 模式路由"]
+        ASR["AgentSessionRuntime"]
+        ASS["AgentSessionServices"]
+        AS["AgentSession"]
+        EXT["扩展系统"]
+        TOOLS["工具系统<br/>read/bash/edit/write"]
+        SKILL["技能系统"]
+        SESS["会话管理器"]
     end
 
-    subgraph "L2: Runtime Layer"
-        AC[pi-agent-core<br>Agent Loop + State]
+    subgraph "Layer 2: 运行时层"
+        AC["pi-agent-core"]
+        AGENT["Agent 类"]
+        LOOP["AgentLoop<br/>turn/tool 循环"]
+        HARNESS["AgentHarness<br/>持久化 + 钩子"]
+        SESSION["Session 树"]
+        COMPACT["压缩系统"]
     end
 
-    subgraph "L1: Provider Layer"
-        AI[pi-ai<br>Unified LLM API]
+    subgraph "Layer 1: LLM 抽象层"
+        AI["pi-ai"]
+        STREAM["stream() / complete()"]
+        REG["ApiProvider 注册表"]
+        MODEL["Model 目录<br/>自动生成"]
+        PROV["供应商实现<br/>Anthropic/OpenAI/Google/..."]
     end
 
-    subgraph "External"
-        P1[Anthropic]
-        P2[OpenAI]
-        P3[Google]
-        P4[20+ Providers]
-    end
+    INT --> AS
+    PRINT --> AS
+    RPC --> AS
+    AS --> AGENT
+    AS --> EXT
+    AS --> TOOLS
+    AS --> SESS
+    AGENT --> LOOP
+    LOOP --> STREAM
+    STREAM --> REG
+    REG --> PROV
 
-    CA --> AC
-    CA --> TUI
-    CA --> AI
-    MOM --> AC
-    MOM --> AI
-    MOM -.复用工具.-> CA
-    WUI --> AI
-    WUI --> AC
-    PODS --> AI
+    style TUI fill:#fce4ec
+    style CA fill:#e1f5fe
+    style AC fill:#fff3e0
+    style AI fill:#e8f5e9
+```
+
+## 分层设计原则
+
+### 原则 1：依赖方向向下
+
+```mermaid
+graph TD
+    CA["coding-agent"] --> AC["agent-core"]
+    CA --> AI["ai"]
+    CA --> TUI["tui"]
     AC --> AI
-    AI --> P1
-    AI --> P2
-    AI --> P3
-    AI --> P4
 
-    style TUI fill:#bd10e0,stroke:#8b0aa1,color:#fff
-    style WUI fill:#b8e986,stroke:#7cb342
-    style CA fill:#4a90d9,stroke:#2c5aa0,color:#fff
-    style MOM fill:#50e3c2,stroke:#2a9d8f
-    style PODS fill:#f8e71c,stroke:#c4a000
-    style AC fill:#7ed321,stroke:#5a9a16
-    style AI fill:#f5a623,stroke:#d48806
+    CA -.->|"不依赖"| TUI2["tui 的运行时"]
+    AI -.->|"不依赖"| AC2["agent-core"]
+    TUI -.->|"不依赖"| AI2["ai"]
 ```
 
----
+每层只依赖其下层，不存在反向依赖。`pi-tui` 是纯 UI 库，完全不感知 Agent 或 AI 的存在。
 
-## 4. Monorepo 架构
+### 原则 2：接口隔离
 
-### 4.1 目录结构
+每层通过明确的接口与上层通信：
 
-```
-pi-mono/
-├── packages/
-│   ├── ai/                   # L1: Provider 层
-│   │   ├── src/
-│   │   │   ├── types.ts      # 核心类型
-│   │   │   ├── api-registry.ts
-│   │   │   ├── providers/    # 各 Provider 实现
-│   │   │   └── models.ts     # 模型注册表
-│   │   └── package.json
-│   │
-│   ├── agent/                # L2: Runtime 层
-│   │   ├── src/
-│   │   │   ├── agent.ts      # Agent 类
-│   │   │   ├── agent-loop.ts # Agent Loop
-│   │   │   └── types.ts      # AgentEvent 等
-│   │   └── package.json
-│   │
-│   ├── coding-agent/         # L3: Application 层
-│   │   ├── src/
-│   │   │   ├── core/         # 核心模块
-│   │   │   │   ├── agent-session.ts
-│   │   │   │   ├── tools/    # 工具实现
-│   │   │   │   ├── extensions/
-│   │   │   │   └── session-manager.ts
-│   │   │   └── modes/        # 运行模式
-│   │   │       ├── interactive/
-│   │   │       ├── rpc/
-│   │   │       └── print/
-│   │   └── package.json
-│   │
-│   ├── tui/                  # L4: Presentation 层
-│   │   ├── src/
-│   │   │   ├── tui.ts        # TUI 核心
-│   │   │   ├── components/   # 组件库
-│   │   │   └── keybindings.ts
-│   │   └── package.json
-│   │
-│   ├── web-ui/               # L4: Web UI
-│   ├── mom/                  # L3: Slack Bot
-│   └── pods/                 # L3: GPU Pod 管理
-│
-├── scripts/                  # 构建脚本
-├── .github/                  # CI/CD
-└── package.json              # 根 package.json (workspaces)
+| 层 | 向上暴露的接口 | 上层使用方式 |
+|----|--------------|------------|
+| pi-ai | `stream()`, `getModel()`, `registerApiProvider()` | 调用函数获取流 |
+| pi-agent-core | `Agent`, `AgentHarness`, `AgentEvent` | 实例化 + 订阅事件 |
+| pi-tui | `Component`, `TUI`, `Editor` | 实现组件接口 + 添加到容器 |
+| pi-coding-agent | `createAgentSession()`, `ExtensionAPI` | SDK 编程接口 |
+
+### 原则 3：传输抽象
+
+Agent 运行时不直接调用 LLM，而是通过可注入的 `StreamFn`：
+
+```mermaid
+graph LR
+    LOOP["AgentLoop"] -->|"StreamFn"| SF{"传输层"}
+    SF -->|"直接"| S1["streamSimple()"]
+    SF -->|"代理"| S2["streamProxy()"]
+    SF -->|"自定义"| S3["扩展提供"]
 ```
 
-### 4.2 构建顺序
+### 原则 4：事件驱动解耦
 
-```
-tui → ai → agent → coding-agent → mom/web-ui/pods
-```
+各层通过事件（而非回调嵌套）通信：
 
-**原因**：
-- `pi-tui` 无外部依赖，首先构建
-- `pi-ai` 是所有包的基础
-- `pi-agent-core` 依赖 `pi-ai`
-- `pi-coding-agent` 依赖 `pi-agent-core`、`pi-ai`、`pi-tui`
-- `pi-mom`、`pi-web-ui`、`pi-pods` 依赖 `pi-coding-agent` 或 `pi-ai`
+```mermaid
+sequenceDiagram
+    participant Loop as AgentLoop
+    participant Agent as Agent
+    participant Harness as AgentHarness
+    participant Session as AgentSession
+    participant Mode as Interactive Mode
 
-### 4.3 锁步版本控制
-
-所有包使用同一版本号（如 `0.70.2`）：
-
-```json
-// packages/ai/package.json
-{
-    "name": "@mariozechner/pi-ai",
-    "version": "0.70.2"
-}
-
-// packages/agent/package.json
-{
-    "name": "@mariozechner/pi-agent-core",
-    "version": "0.70.2"
-}
+    Loop->>Agent: emit(turn_start)
+    Agent->>Harness: emit(turn_start)
+    Harness->>Session: emit(turn_start)
+    Session->>Mode: emit(turn_start)
+    Mode->>Mode: 更新 UI
 ```
 
-**优势**：
-- 简化依赖管理
-- 避免版本冲突
-- 清晰的发布节奏
+## 关键架构决策
 
----
+### 决策 1：monorepo + lockstep versioning
 
-## 5. 数据流向
+**选择**：所有包同版本号，一起发布
 
-### 5.1 用户输入到响应渲染
+**理由**：
+- 包间 API 耦合紧密，独立版本会造成兼容性矩阵爆炸
+- 简化发布流程和依赖解析
+- 用户只需关心一个版本号
 
+### 决策 2：erasable TypeScript syntax only
+
+**选择**：只使用可擦除的 TypeScript 语法，禁用 enum、namespace、parameter properties
+
+**理由**：
+- 支持 Node.js 原生 `--strip-types` 模式
+- 减少构建复杂度
+- 输出 JS 与源码 1:1 对应
+
+### 决策 3：流式优先，错误带内
+
+**选择**：LLM 调用必须返回 `AssistantMessageEventStream`，错误通过流内事件传递，不抛异常
+
+**理由**：
+- 流式是 LLM 交互的自然模型
+- 带内错误让调用方有统一的处理路径
+- 避免流已部分消费后的异常处理复杂性
+
+### 决策 4：AgentMessage vs Message 双层消息
+
+**选择**：Agent 内部使用可扩展的 `AgentMessage`，仅在 LLM 调用边界转换为 `Message`
+
+**理由**：
+- 允许应用添加自定义消息类型（bash 执行记录、压缩摘要等）
+- 自定义消息不污染 LLM 上下文
+- 类型安全的声明合并扩展
+
+```mermaid
+graph LR
+    subgraph "Agent 内部"
+        AM["AgentMessage"]
+        UM["UserMessage"]
+        ASM["AssistantMessage"]
+        TRM["ToolResultMessage"]
+        BE["BashExecutionMessage"]
+        CM["CompactionSummary"]
+        CU["CustomMessage"]
+    end
+
+    subgraph "LLM 边界"
+        CONV["convertToLlm()"]
+    end
+
+    subgraph "LLM 层"
+        M["Message"]
+        MU["UserMessage"]
+        MA["AssistantMessage"]
+        MT["ToolResultMessage"]
+    end
+
+    AM --> CONV
+    CONV --> M
+    BE -->|"转为 user text"| CONV
+    CM -->|"转为 user text"| CONV
+    CU -->|"按 display 转换"| CONV
 ```
-用户输入
-  ↓
-InteractiveMode.handleInput()
-  ↓
-AgentSession.processInput()
-  ↓
-构建系统提示 (tools + skills + context)
-  ↓
-Agent.prompt(messages)
-  ↓
-Agent Loop 外层
-  ↓
-Agent Loop 内层
-  ↓
-convertToLlm() - AgentMessage[] → Message[]
-  ↓
-pi-ai.streamSimple()
-  ↓
-Provider API 调用
-  ↓
-流式响应事件
-  ↓
-Agent 事件发射
-  ↓
-ExtensionRunner 事件分发
-  ↓
-TUI 渲染更新
-  ↓
-SessionManager 持久化 (JSONL)
+
+### 决策 5：会话树而非线性日志
+
+**选择**：JSONL 文件中每条记录有 `parentId`，形成树状结构
+
+**理由**：
+- 支持从任意节点分支探索不同方案
+- 压缩操作可以截断子树而不丢失历史
+- 树导航让用户可以回溯
+- append-only 保证数据安全
+
+### 决策 6：扩展通过 jiti 加载
+
+**选择**：使用 jiti 动态加载 TypeScript 扩展，而非预编译
+
+**理由**：
+- 用户直接编写 `.ts` 文件即可，无需构建步骤
+- 开发体验优先
+- Bun 二进制版本中预打包虚拟模块
+
+## 运行时架构
+
+### 启动序列
+
+```mermaid
+sequenceDiagram
+    participant CLI as cli.ts
+    participant Main as main.ts
+    participant ASR as AgentSessionRuntime
+    participant ASS as AgentSessionServices
+    participant AS as AgentSession
+    participant Mode as Mode (TUI/Print/RPC)
+
+    CLI->>Main: main()
+    Main->>Main: parseArgs()
+    Main->>Main: 执行迁移
+    Main->>Main: 加载设置
+    Main->>ASR: createAgentSessionRuntime()
+    ASR->>ASS: createAgentSessionServices()
+    ASS->>ASS: 初始化 AuthStorage
+    ASS->>ASS: 初始化 ModelRegistry
+    ASS->>ASS: 初始化 SettingsManager
+    ASS->>ASS: 初始化 ResourceLoader
+    ASR->>AS: createAgentSession()
+    AS->>AS: 加载扩展
+    AS->>AS: 发现技能/提示/主题
+    AS->>AS: 构建系统提示
+    Main->>Mode: dispatch(mode)
+    Mode->>Mode: 启动 UI / 等待输入
 ```
 
-### 5.2 工具执行流程
+### Agent 循环
 
+```mermaid
+flowchart TD
+    START["agent_start"] --> CHECK_STEER{"有 steering 消息?"}
+    CHECK_STEER -->|"是"| INJECT["注入 steering 消息"]
+    CHECK_STEER -->|"否"| STREAM["流式获取助手回复"]
+    INJECT --> STREAM
+    STREAM --> CHECK_ERR{"错误/中止?"}
+    CHECK_ERR -->|"是"| END["agent_end"]
+    CHECK_ERR -->|"否"| CHECK_TOOLS{"有工具调用?"}
+    CHECK_TOOLS -->|"否"| TURN_END["turn_end"]
+    CHECK_TOOLS -->|"是"| EXEC["执行工具<br/>(串行或并行)"]
+    EXEC --> TURN_END
+    TURN_END --> SHOULD_STOP{"shouldStopAfterTurn?"}
+    SHOULD_STOP -->|"是"| END
+    SHOULD_STOP -->|"否"| CHECK_STEER2{"有 steering 消息?"}
+    CHECK_STEER2 -->|"是"| INJECT2["注入并继续"]
+    INJECT2 --> STREAM
+    CHECK_STEER2 -->|"否"| CHECK_FOLLOWUP{"有 follow-up 消息?"}
+    CHECK_FOLLOWUP -->|"是"| FOLLOWUP["注入 follow-up"]
+    FOLLOWUP --> CHECK_STEER
+    CHECK_FOLLOWUP -->|"否"| END
 ```
-AssistantMessage 包含 toolCall
-  ↓
-Agent Loop 检测工具调用
-  ↓
-prepareToolCall() - 参数准备
-  ↓
-validateToolArguments() - TypeBox 验证
-  ↓
-beforeToolCall hook (扩展可拦截/修改)
-  ↓
-Tool.execute()
-  ↓
-onUpdate 回调 (流式进度)
-  ↓
-afterToolCall hook (扩展可修改结果)
-  ↓
-ToolResultMessage
-  ↓
-加入消息队列，发回 LLM
-```
 
----
+## 技术栈选型理由
 
-## 6. 关键架构模式
-
-### 6.1 注册表模式
-
-**位置**：Provider 注册、工具注册、命令注册
-
-**实现**：Map-based + 懒加载
-
-### 6.2 观察者模式
-
-**位置**：Agent 事件、扩展事件
-
-**实现**：EventEmitter + 订阅/取消订阅
-
-### 6.3 策略模式
-
-**位置**：工具执行模式（顺序 vs 并行）
-
-**实现**：`executionMode` 字段
-
-### 6.4 模板方法模式
-
-**位置**：Agent Loop
-
-**实现**：定义骨架，子步骤可扩展
-
-### 6.5 装饰器模式
-
-**位置**：工具包装、结果修改
-
-**实现**：`wrapToolDefinition()`、`afterToolCall` 钩子
-
----
-
-## 7. 非功能性考虑
-
-### 7.1 性能
-
-- **懒加载**：Provider 按需加载
-- **差分渲染**：TUI 仅更新变化区域
-- **流式响应**：实时显示 LLM 输出
-- **上下文压缩**：减少 Token 消耗
-
-### 7.2 可扩展性
-
-- **扩展系统**：TypeScript API
-- **Skills 系统**：SKILL.md 文件
-- **主题系统**：JSON 配置
-- **快捷键系统**：声明式配置
-
-### 7.3 可维护性
-
-- **分层架构**：职责清晰
-- **单向依赖**：避免循环依赖
-- **类型安全**：TypeScript 严格模式
-- **代码质量**：Biome 格式化、无 `any` 类型
-
-### 7.4 可测试性
-
-- **Faux Provider**：模拟 LLM 响应
-- **Harness**：测试辅助工具
-- **单元测试**：每个包独立测试
-- **回归测试**：issue 专属测试
-
----
-
-## 8. 总结
-
-pi-mono 的架构设计体现了以下原则：
-
-1. **分层清晰**：L1-L4 职责明确
-2. **Provider 无关**：统一抽象，可无缝切换
-3. **事件驱动**：解耦组件，支持扩展
-4. **类型安全**：泛型传递 + TypeBox
-5. **核心极简**：功能通过扩展实现
-6. **性能优先**：懒加载、差分渲染、流式响应
-
-这种架构使得 pi-mono 既是一个完整的产品，也是一个可扩展的平台。
-
----
-
-**相关文档**：
-- [包依赖关系](./02-package-dependencies.md)
-- [核心数据流](./03-data-flow.md)
-- [事件系统](./04-event-system.md)
-- [pi-ai 包分析](../03-packages/01-pi-ai.md)
+| 技术 | 选型 | 理由 |
+|------|------|------|
+| TypeScript | 5.9 + erasable syntax | 类型安全 + Node 原生支持 |
+| tsgo | Native TS compiler | 10-30x 比 tsc 快 |
+| Node.js | >= 22.19 | LTS, 原生 strip-types |
+| Biome | 2.3 | 比 ESLint + Prettier 快 100x |
+| npm workspaces | monorepo | 原生支持，无额外工具 |
+| TypeBox | JSON Schema | 运行时类型验证 + TS 推导 |
+| JSONL | 会话存储 | append-only, 流式读写 |
+| Vitest | 测试 | 快速, ESM 原生 |

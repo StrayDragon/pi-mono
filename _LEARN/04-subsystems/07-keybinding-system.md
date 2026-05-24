@@ -1,696 +1,341 @@
-# Keybinding System
+# 快捷键系统
 
-## 概述
+Pi 的快捷键采用**分层注册 + 声明合并 + 用户覆盖**模型：`pi-tui` 提供编辑器/输入/选择的基础绑定；`coding-agent` 通过 TypeScript 声明合并扩展应用级快捷键；`CustomEditor` 在输入链前端拦截应用与扩展快捷键。
 
-pi-mono 的快捷键系统是一个类型安全、高度可配置的终端 UI 快捷键管理框架，支持：
-- **类型安全的键标识符**：编译时验证和自动补全
-- **多修饰键组合**：支持 ctrl、shift、alt、super 及其组合
-- **Kitty 键盘协议**：现代终端的增强键盘支持
-- **向后兼容**：传统终端转义序列支持
-- **冲突检测**：自动检测并报告快捷键冲突
-- **用户配置**：通过 JSON 文件自定义快捷键
-- **配置迁移**：自动迁移旧版快捷键配置
+---
 
-**核心文件**：
-- `/packages/tui/src/keybindings.ts` (245 行) - TUI 快捷键管理器
-- `/packages/tui/src/keys.ts` (600+ 行) - 键解析和类型定义
-- `/packages/coding-agent/src/core/keybindings.ts` (371 行) - 应用快捷键定义
+## 整体架构
 
-## 键标识符系统
+```mermaid
+flowchart TB
+    subgraph pi-tui
+        TUI_KB[TUI_KEYBINDINGS]
+        TUI_IF[Keybindings 接口]
+        TUI_MGR[KeybindingsManager 基类]
+        MK[matchesKey]
+    end
 
-### 类型安全的 KeyId
+    subgraph coding-agent
+        APP_KB[KEYBINDINGS = TUI + app.*]
+        APP_IF[AppKeybindings 声明合并]
+        CA_MGR[KeybindingsManager.create]
+        USER[~/.pi/agent/keybindings.json]
+        CE[CustomEditor.handleInput]
+    end
 
-```typescript
-type Letter = "a" | "b" | "c" | ... | "z";
+    subgraph extensions
+        RS[registerShortcut]
+        SC[shortcuts Map]
+    end
 
-type Digit = "0" | "1" | "2" | ... | "9";
-
-type SymbolKey =
-  | "`" | "-" | "=" | "[" | "]" | "\\" | ";" | "'"
-  | "," | "." | "/" | "!" | "@" | "#" | "$" | "%"
-  | "^" | "&" | "*" | "(" | ")" | "_" | "+" | "|"
-  | "~" | "{" | "}" | ":" | "<" | ">" | "?";
-
-type SpecialKey =
-  | "escape" | "esc" | "enter" | "return" | "tab" | "space"
-  | "backspace" | "delete" | "insert" | "clear" | "home" | "end"
-  | "pageUp" | "pageDown" | "up" | "down" | "left" | "right"
-  | "f1" | "f2" | ... | "f12";
-
-type ModifierName = "ctrl" | "shift" | "alt" | "super";
-
-type BaseKey = Letter | Digit | SymbolKey | SpecialKey;
-
-// 递归类型生成所有修饰键组合
-type ModifiedKeyId<Key extends string> = {
-  [M in ModifierName]:
-    `${M}+${Key}` |
-    `${M}+${ModifiedKeyId<Key, Exclude<ModifierName, M>>}`;
-}[ModifierName];
-
-export type KeyId = BaseKey | ModifiedKeyId<BaseKey>;
+    TUI_KB --> APP_KB
+    TUI_IF --> APP_IF
+    TUI_MGR --> CA_MGR
+    USER --> CA_MGR
+    APP_KB --> CA_MGR
+    RS --> SC
+    SC --> CE
+    CA_MGR --> CE
+    MK --> CE
+    MK --> TUI_MGR
 ```
 
-**示例**：
+---
+
+## TUI 基础快捷键（TUI_KEYBINDINGS）
+
+定义于 `packages/tui/src/keybindings.ts`，命名空间 `tui.*`：
+
+### tui.editor.* — 编辑器导航与编辑
+
+| ID | 默认键 | 说明 |
+|----|--------|------|
+| `tui.editor.cursorUp/Down/Left/Right` | 方向键 / `ctrl+b,f` | 光标移动 |
+| `tui.editor.cursorWordLeft/Right` | `alt+方向` / `alt+b,f` | 按词移动 |
+| `tui.editor.cursorLineStart/End` | `home` / `ctrl+a,e` | 行首/行尾 |
+| `tui.editor.pageUp/Down` | `pageUp/Down` | 翻页 |
+| `tui.editor.deleteCharBackward/Forward` | `backspace` / `delete,ctrl+d` | 删字符 |
+| `tui.editor.deleteWordBackward/Forward` | `ctrl+w` / `alt+d` | 删词 |
+| `tui.editor.deleteToLineStart/End` | `ctrl+u` / `ctrl+k` | 删到行首/行尾 |
+| `tui.editor.yank / yankPop` | `ctrl+y` / `alt+y` | Kill ring |
+| `tui.editor.undo` | `ctrl+-` | 撤销 |
+| `tui.editor.jumpForward/Backward` | `ctrl+]` / `ctrl+alt+]` | 字符跳转 |
+
+### tui.input.* — 通用输入
+
+| ID | 默认键 |
+|----|--------|
+| `tui.input.newLine` | `shift+enter` |
+| `tui.input.submit` | `enter` |
+| `tui.input.tab` | `tab` |
+| `tui.input.copy` | `ctrl+c` |
+
+### tui.select.* — 列表选择
+
+| ID | 默认键 |
+|----|--------|
+| `tui.select.up/down` | 方向键 |
+| `tui.select.pageUp/Down` | `pageUp/Down` |
+| `tui.select.confirm` | `enter` |
+| `tui.select.cancel` | `escape`, `ctrl+c` |
+
+---
+
+## 应用级快捷键（app.*）
+
+`packages/coding-agent/src/core/keybindings.ts` 扩展 `KEYBINDINGS`：
+
+| 类别 | 示例 ID | 默认键 |
+|------|---------|--------|
+| 会话控制 | `app.interrupt` | `escape` |
+| | `app.clear` | `ctrl+c` |
+| | `app.exit` | `ctrl+d`（编辑器空时） |
+| | `app.suspend` | `ctrl+z`（非 Windows） |
+| 模型/思考 | `app.thinking.cycle` | `shift+tab` |
+| | `app.model.cycleForward/Backward` | `ctrl+p` / `shift+ctrl+p` |
+| | `app.model.select` | `ctrl+l` |
+| | `app.thinking.toggle` | `ctrl+t` |
+| 工具/UI | `app.tools.expand` | `ctrl+o` |
+| | `app.editor.external` | `ctrl+g` |
+| 消息队列 | `app.message.followUp` | `alt+enter` |
+| | `app.message.dequeue` | `alt+up` |
+| 剪贴板 | `app.clipboard.pasteImage` | `ctrl+v`（Win: `alt+v`） |
+| 会话树 | `app.session.tree`, `app.tree.foldOrUp` 等 | 多数默认 `[]`，可配置 |
+| 模型列表 | `app.models.save`, `app.models.enableAll` 等 | 上下文相关 |
+
+部分 ID 在不同 UI 上下文（会话列表、模型选择器、树视图）复用相同物理键，由当前焦点组件决定实际处理器。
+
+---
+
+## 声明合并（Declaration Merging）
+
+coding-agent 通过模块增强扩展 pi-tui 的类型系统：
+
 ```typescript
-"ctrl+c"           // 有效
-"ctrl+shift+p"     // 有效
-"ctrl+alt+delete"  // 有效
-"ctrl+shift+alt+super+x"  // 有效
-"ctrl+z+shift"     // 无效（编译错误）
-"unknow+key"       // 无效（编译错误）
-```
-
-### Key 辅助对象
-
-提供类型安全的键标识符创建：
-
-```typescript
-export const Key = {
-  // 特殊键
-  escape: "escape" as const,
-  enter: "enter" as const,
-  tab: "tab" as const,
-  // ... 更多特殊键
-
-  // 符号键
-  backtick: "`" as const,
-  comma: "," as const,
-  period: "." as const,
-  // ... 更多符号键
-
-  // 单修饰键
-  ctrl: <K extends BaseKey>(key: K): `ctrl+${K}` => `ctrl+${key}`,
-  shift: <K extends BaseKey>(key: K): `shift+${K}` => `shift+${key}`,
-  alt: <K extends BaseKey>(key: K): `alt+${K}` => `alt+${key}`,
-  super: <K extends BaseKey>(key: K): `super+${K}` => `super+${key}`,
-
-  // 组合修饰键
-  ctrlShift: <K extends BaseKey>(key: K): `ctrl+shift+${K}` => `ctrl+shift+${key}`,
-  ctrlAlt: <K extends BaseKey>(key: K): `ctrl+alt+${K}` => `ctrl+alt+${key}`,
-  shiftAlt: <K extends BaseKey>(key: K): `shift+alt+${K}` => `shift+alt+${key}`,
-  // ... 更多组合
-} as const;
-```
-
-**使用示例**：
-```typescript
-Key.ctrl("c")           // "ctrl+c"
-Key.ctrlShift("p")      // "ctrl+shift+p"
-Key.alt(Key.enter)      // "alt+enter"
-```
-
-## 快捷键定义
-
-### 声明合并扩展
-
-通过 TypeScript 模块声明合并扩展快捷键接口：
-
-```typescript
-// pi-tui 基础定义
-export interface Keybindings {
-  "tui.editor.cursorUp": true;
-  "tui.editor.cursorDown": true;
-  // ... 更多 TUI 快捷键
-}
-
-// pi-coding-agent 扩展
-declare module "@mariozechner/pi-tui" {
+// packages/coding-agent/src/core/keybindings.ts
+declare module "@earendil-works/pi-tui" {
   interface Keybindings extends AppKeybindings {}
 }
 
-export interface AppKeybindings {
-  "app.interrupt": true;
-  "app.clear": true;
-  // ... 更多应用快捷键
-}
-```
-
-### 快捷键定义结构
-
-```typescript
-export interface KeybindingDefinition {
-  defaultKeys: KeyId | KeyId[];  // 默认键绑定
-  description?: string;          // 人类可读描述
-}
-
-export type KeybindingDefinitions = Record<string, KeybindingDefinition>;
-
 export const KEYBINDINGS = {
-  "app.interrupt": {
-    defaultKeys: "escape",
-    description: "Cancel or abort"
-  },
-  "app.clear": {
-    defaultKeys: "ctrl+c",
-    description: "Clear editor"
-  },
-  "app.model.cycleForward": {
-    defaultKeys: ["ctrl+p", "ctrl+shift+p"],  // 多个快捷键
-    description: "Cycle to next model"
-  },
+  ...TUI_KEYBINDINGS,
+  "app.interrupt": { defaultKeys: "escape", ... },
+  // ...
 } as const satisfies KeybindingDefinitions;
 ```
 
-### TUI 默认快捷键
+效果：
 
-**编辑器导航**：
-```typescript
-"tui.editor.cursorUp": { defaultKeys: "up" },
-"tui.editor.cursorDown": { defaultKeys: "down" },
-"tui.editor.cursorLeft": { defaultKeys: ["left", "ctrl+b"] },
-"tui.editor.cursorRight": { defaultKeys: ["right", "ctrl+f"] },
-"tui.editor.cursorWordLeft": { defaultKeys: ["alt+left", "ctrl+left", "alt+b"] },
-"tui.editor.cursorWordRight": { defaultKeys: ["alt+right", "ctrl+right", "alt+f"] },
-"tui.editor.cursorLineStart": { defaultKeys: ["home", "ctrl+a"] },
-"tui.editor.cursorLineEnd": { defaultKeys: ["end", "ctrl+e"] },
+- `Keybinding` 联合类型自动包含 `tui.*` 与 `app.*`
+- `KeybindingsManager.matches(data, "app.interrupt")` 类型安全
+- 下游扩展 CustomEditor 时 IDE 可补全全部 ID
+
+```mermaid
+flowchart LR
+    TUI[pi-tui Keybindings] --> MERGE[interface extends AppKeybindings]
+    APP[AppKeybindings] --> MERGE
+    MERGE --> UNION[Keybinding = tui.* | app.*]
+    UNION --> MGR[KeybindingsManager.matches]
 ```
 
-**编辑器操作**：
-```typescript
-"tui.editor.deleteCharBackward": { defaultKeys: "backspace" },
-"tui.editor.deleteCharForward": { defaultKeys: ["delete", "ctrl+d"] },
-"tui.editor.deleteWordBackward": { defaultKeys: ["ctrl+w", "alt+backspace"] },
-"tui.editor.deleteWordForward": { defaultKeys: ["alt+d", "alt+delete"] },
-"tui.editor.yank": { defaultKeys: "ctrl+y" },
-"tui.editor.undo": { defaultKeys: "ctrl+-" },
-```
+---
 
-**通用选择**：
-```typescript
-"tui.select.up": { defaultKeys: "up" },
-"tui.select.down": { defaultKeys: "down" },
-"tui.select.confirm": { defaultKeys: "enter" },
-"tui.select.cancel": { defaultKeys: ["escape", "ctrl+c"] },
-```
-
-### 应用快捷键
-
-**会话管理**：
-```typescript
-"app.session.new": { defaultKeys: [] },
-"app.session.tree": { defaultKeys: [] },
-"app.session.fork": { defaultKeys: [] },
-"app.session.resume": { defaultKeys: [] },
-"app.session.rename": { defaultKeys: "ctrl+r" },
-"app.session.delete": { defaultKeys: "ctrl+d" },
-```
-
-**模型管理**：
-```typescript
-"app.model.cycleForward": { defaultKeys: "ctrl+p" },
-"app.model.cycleBackward": { defaultKeys: "shift+ctrl+p" },
-"app.model.select": { defaultKeys: "ctrl+l" },
-"app.models.save": { defaultKeys: "ctrl+s" },
-"app.models.enableAll": { defaultKeys: "ctrl+a" },
-```
-
-**树导航**：
-```typescript
-"app.tree.foldOrUp": { defaultKeys: ["ctrl+left", "alt+left"] },
-"app.tree.unfoldOrDown": { defaultKeys: ["ctrl+right", "alt+right"] },
-"app.tree.editLabel": { defaultKeys: "shift+l" },
-"app.tree.filter.cycleForward": { defaultKeys: "ctrl+o" },
-```
-
-## 快捷键管理器
-
-### KeybindingsManager 类
+## KeybindingsManager.create()
 
 ```typescript
-export class KeybindingsManager {
-  private definitions: KeybindingDefinitions;
-  private userBindings: KeybindingsConfig;
-  private keysById = new Map<Keybinding, KeyId[]>();
-  private conflicts: KeybindingConflict[] = [];
-
-  constructor(
-    definitions: KeybindingDefinitions,
-    userBindings: KeybindingsConfig = {}
-  ) {
-    this.definitions = definitions;
-    this.userBindings = userBindings;
-    this.rebuild();
-  }
-
-  // 检查输入是否匹配快捷键
-  matches(data: string, keybinding: Keybinding): boolean {
-    const keys = this.keysById.get(keybinding) ?? [];
-    for (const key of keys) {
-      if (matchesKey(data, key)) return true;
-    }
-    return false;
-  }
-
-  // 获取快捷键的键绑定
-  getKeys(keybinding: Keybinding): KeyId[] {
-    return [...(this.keysById.get(keybinding) ?? [])];
-  }
-
-  // 获取快捷键定义
-  getDefinition(keybinding: Keybinding): KeybindingDefinition {
-    return this.definitions[keybinding];
-  }
-
-  // 获取所有冲突
-  getConflicts(): KeybindingConflict[] {
-    return this.conflicts.map(conflict => ({
-      ...conflict,
-      keybindings: [...conflict.keybindings]
-    }));
-  }
-
-  // 更新用户配置
-  setUserBindings(userBindings: KeybindingsConfig): void {
-    this.userBindings = userBindings;
-    this.rebuild();
-  }
-
-  // 获取解析后的绑定（默认 + 用户）
-  getResolvedBindings(): KeybindingsConfig {
-    const resolved: KeybindingsConfig = {};
-    for (const id of Object.keys(this.definitions)) {
-      const keys = this.keysById.get(id as Keybinding) ?? [];
-      resolved[id] = keys.length === 1 ? keys[0]! : [...keys];
-    }
-    return resolved;
-  }
+static create(agentDir = getAgentDir()): KeybindingsManager {
+  const configPath = join(agentDir, "keybindings.json");
+  const userBindings = KeybindingsManager.loadFromFile(configPath);
+  return new KeybindingsManager(userBindings, configPath);
 }
 ```
 
-### 构建和冲突检测
+### 解析流程
+
+```mermaid
+flowchart TD
+    FILE[keybindings.json] --> RAW[loadRawConfig]
+    RAW --> MIG[migrateKeybindingsConfig]
+    MIG --> LEG{旧名如 interrupt?}
+    LEG -->|是| MAP[映射到 app.interrupt 等]
+    LEG -->|否| KEEP[保留]
+    MAP --> ORDER[orderKeybindingsConfig]
+    KEEP --> ORDER
+    ORDER --> CFG[KeybindingsConfig]
+    CFG --> REBUILD[rebuild keysById]
+    DEF[KEYBINDINGS 默认值] --> REBUILD
+    REBUILD --> RESOLVED[有效键位映射]
+```
+
+特性：
+
+- 用户绑定**覆盖**同 ID 的 `defaultKeys`；`[]` 表示禁用
+- 检测同一物理键被多个 ID 声明的冲突（`conflicts` 数组）
+- `reload()` 重新读取配置文件
+- `getEffectiveConfig()` 返回合并后的完整映射
+
+### 旧名迁移表
+
+`KEYBINDING_NAME_MIGRATIONS` 将历史短名迁移到新命名空间，例如：
+
+- `interrupt` → `app.interrupt`
+- `cursorUp` → `tui.editor.cursorUp`
+- `submit` → `tui.input.submit`
+
+---
+
+## matchesKey()：Legacy + Kitty 协议
+
+`packages/tui/src/keys.ts` 提供统一键匹配：
+
+- **Legacy 终端序列**：ESC、`^X` 控制符、CSI 序列等
+- **[Kitty 键盘协议](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)**：增强修饰键与 Unicode 键报告
+
+全局状态 `setKittyProtocolActive(active)` 由 `ProcessTerminal` 在检测到协议支持后设置。
+
+```mermaid
+flowchart TD
+    INPUT[终端原始字节 data] --> PARSE[parseKey / 序列匹配]
+    PARSE --> KITTY{Kitty 协议激活?}
+    KITTY -->|是| KPARSE[Kitty 格式解析]
+    KITTY -->|否| LEG[Legacy CSI/控制符]
+    KPARSE --> CMP{与 KeyId 相等?}
+    LEG --> CMP
+    CMP -->|是| MATCH[matchesKey 返回 true]
+    CMP -->|否| NOMATCH[false]
+```
+
+`KeybindingsManager.matches(data, id)` 遍历该 ID 绑定的所有 `KeyId`，任一匹配即返回 `true`。
+
+---
+
+## CustomEditor 输入拦截链
+
+`CustomEditor` 继承 pi-tui `Editor`，重写 `handleInput()`：
+
+```mermaid
+flowchart TD
+    IN[handleInput data] --> EXT{onExtensionShortcut?}
+    EXT -->|handled| DONE[return]
+    EXT -->|否| PASTE{app.clipboard.pasteImage?}
+    PASTE -->|是| IMG[onPasteImage]
+    PASTE -->|否| INT{app.interrupt?}
+    INT -->|是且非补全| ESC[onEscape / handler]
+    INT -->|否或补全中| EXIT{app.exit 且编辑器空?}
+    EXIT -->|是| CTRLD[onCtrlD / handler]
+    EXIT -->|否| LOOP[遍历 actionHandlers Map]
+    LOOP -->|匹配 app.*| ACT[执行 handler]
+    LOOP -->|无匹配| SUPER[super.handleInput → tui.editor.*]
+    IMG --> DONE
+    ESC --> DONE
+    CTRLD --> DONE
+    ACT --> DONE
+    SUPER --> DONE
+```
+
+优先级（从高到低）：
+
+1. **扩展快捷键** — `registerShortcut` 注册
+2. **粘贴图片** — `app.clipboard.pasteImage`
+3. **中断** — `app.interrupt`（自动补全激活时交给父类取消补全）
+4. **退出** — `app.exit` 仅当 `getText().length === 0`
+5. **其他 app.\*** — `actionHandlers` 中注册的处理器
+6. **TUI 默认** — 光标、删除、提交等 `tui.*` 行为
+
+`interactive-mode.ts` 在启动时为各 `app.*` 动作调用 `editor.onAction(...)` 注册 handler。
+
+### 扩展 Editor 时的快捷键转发
+
+自定义 `EditorFactory` 若继承 `CustomEditor`，需手动转发：
 
 ```typescript
-private rebuild(): void {
-  this.keysById.clear();
-  this.conflicts = [];
-
-  // 收集用户键声明
-  const userClaims = new Map<KeyId, Set<Keybinding>>();
-  for (const [keybinding, keys] of Object.entries(this.userBindings)) {
-    if (!(keybinding in this.definitions)) continue;
-    for (const key of normalizeKeys(keys)) {
-      const claimants = userClaims.get(key) ?? new Set<Keybinding>();
-      claimants.add(keybinding as Keybinding);
-      userClaims.set(key, claimants);
-    }
-  }
-
-  // 检测冲突（一个键被多个操作声明）
-  for (const [key, keybindings] of userClaims) {
-    if (keybindings.size > 1) {
-      this.conflicts.push({
-        key,
-        keybindings: [...keybindings]
-      });
-    }
-  }
-
-  // 构建键映射
-  for (const [id, definition] of Object.entries(this.definitions)) {
-    const userKeys = this.userBindings[id];
-    const keys = userKeys === undefined
-      ? normalizeKeys(definition.defaultKeys)
-      : normalizeKeys(userKeys);
-    this.keysById.set(id as Keybinding, keys);
-  }
+if (!customEditor.onExtensionShortcut) {
+  customEditor.onExtensionShortcut = (data) =>
+    this.defaultEditor.onExtensionShortcut?.(data);
 }
 ```
 
-**冲突示例**：
-```json
-// keybindings.json
-{
-  "app.clear": "ctrl+c",
-  "tui.select.cancel": "ctrl+c"  // 冲突！
-}
-```
+---
+
+## 扩展快捷键：registerShortcut()
+
+扩展 API（`packages/coding-agent/src/core/extensions/loader.ts`）：
 
 ```typescript
-// 冲突报告
-[
-  {
-    key: "ctrl+c",
-    keybindings: ["app.clear", "tui.select.cancel"]
-  }
-]
+pi.registerShortcut("ctrl+shift+m", {
+  description: "My action",
+  handler: async (ctx) => { /* ... */ },
+});
 ```
 
-## 用户配置
+```mermaid
+sequenceDiagram
+    participant EXT as Extension
+    participant LR as ExtensionLoader
+    participant ER as ExtensionRunner
+    participant CE as CustomEditor
+    participant CTX as ExtensionContext
 
-### 配置文件
-
-用户快捷键配置存储在 `~/.pi/agent/keybindings.json`：
-
-```json
-{
-  "app.clear": "ctrl+c",
-  "app.model.cycleForward": ["ctrl+p", "ctrl+shift+p"],
-  "tui.editor.cursorLeft": "ctrl+b"
-}
+    EXT->>LR: registerShortcut(key, handler)
+    LR->>ER: shortcuts Map 存储
+    Note over ER: getShortcuts 过滤与用户 keybindings 冲突
+    CE->>CE: handleInput(data)
+    CE->>CE: matchesKey(data, shortcut)
+    CE->>CTX: handler(createContext())
 ```
 
-### 配置加载
+`setupExtensionShortcuts()` 将 handler 包装为异步执行，错误显示在 TUI 状态栏。Shortcut handler 可通过 `ctx.compact()` 等访问会话能力。
 
-```typescript
-export class KeybindingsManager extends TuiKeybindingsManager {
-  private configPath: string | undefined;
+---
 
-  static create(agentDir: string = getAgentDir()): KeybindingsManager {
-    const configPath = join(agentDir, "keybindings.json");
-    const userBindings = KeybindingsManager.loadFromFile(configPath);
-    return new KeybindingsManager(userBindings, configPath);
-  }
+## 快捷键解析链（完整）
 
-  private static loadFromFile(path: string): KeybindingsConfig {
-    const rawConfig = loadRawConfig(path);
-    if (!rawConfig) return {};
-    return toKeybindingsConfig(
-      migrateKeybindingsConfig(rawConfig).config
-    );
-  }
+```mermaid
+flowchart TB
+    subgraph 配置源
+        DEF[KEYBINDINGS 默认]
+        USER[keybindings.json]
+    end
 
-  reload(): void {
-    if (!this.configPath) return;
-    this.setUserBindings(
-      KeybindingsManager.loadFromFile(this.configPath)
-    );
-  }
-}
+    subgraph KeybindingsManager
+        MERGE[用户覆盖 defaultKeys]
+        CONFLICT[冲突检测]
+        KEYS[keysById Map]
+    end
+
+    subgraph 运行时匹配
+        INPUT[键盘输入 data]
+        MK[matchesKey]
+        M[manager.matches id]
+    end
+
+    subgraph 处理器
+        EXT_H[扩展 shortcut handler]
+        APP_H[app actionHandlers]
+        TUI_H[Editor 父类 tui.*]
+    end
+
+    DEF --> MERGE
+    USER --> MERGE
+    MERGE --> CONFLICT --> KEYS
+    INPUT --> MK
+    KEYS --> M
+    MK --> M
+    M -->|扩展优先| EXT_H
+    M -->|app.*| APP_H
+    M -->|tui.*| TUI_H
 ```
 
-### 配置解析
-
-```typescript
-function toKeybindingsConfig(value: unknown): KeybindingsConfig {
-  if (!isRecord(value)) return {};
-
-  const config: KeybindingsConfig = {};
-  for (const [key, binding] of Object.entries(value)) {
-    if (typeof binding === "string") {
-      config[key] = binding as KeyId;
-    } else if (Array.isArray(binding) &&
-               binding.every(entry => typeof entry === "string")) {
-      config[key] = binding as KeyId[];
-    }
-  }
-  return config;
-}
-```
-
-## 配置迁移
-
-### 旧版名称映射
-
-系统自动迁移旧版快捷键名称到新命名空间：
-
-```typescript
-const KEYBINDING_NAME_MIGRATIONS = {
-  // 旧名称 → 新名称
-  cursorUp: "tui.editor.cursorUp",
-  cursorDown: "tui.editor.cursorDown",
-  cursorLeft: "tui.editor.cursorLeft",
-  cursorRight: "tui.editor.cursorRight",
-  deleteCharBackward: "tui.editor.deleteCharBackward",
-  deleteCharForward: "tui.editor.deleteCharForward",
-  newLine: "tui.input.newLine",
-  submit: "tui.input.submit",
-  selectUp: "tui.select.up",
-  selectDown: "tui.select.down",
-  interrupt: "app.interrupt",
-  clear: "app.clear",
-  exit: "app.exit",
-  cycleModelForward: "app.model.cycleForward",
-  cycleThinkingLevel: "app.thinking.cycle",
-  // ... 更多映射
-} as const;
-```
-
-### 迁移逻辑
-
-```typescript
-function migrateKeybindingsConfig(rawConfig: Record<string, unknown>): {
-  config: Record<string, unknown>;
-  migrated: boolean;
-} {
-  const config: Record<string, unknown> = {};
-  let migrated = false;
-
-  for (const [key, value] of Object.entries(rawConfig)) {
-    // 检查是否是旧名称
-    const nextKey = isLegacyKeybindingName(key)
-      ? KEYBINDING_NAME_MIGRATIONS[key]
-      : key;
-
-    if (nextKey !== key) {
-      migrated = true;
-    }
-
-    // 如果新键已存在，跳过（用户已手动配置）
-    if (key !== nextKey && Object.hasOwn(rawConfig, nextKey)) {
-      migrated = true;
-      continue;
-    }
-
-    config[nextKey] = value;
-  }
-
-  return {
-    config: orderKeybindingsConfig(config),
-    migrated
-  };
-}
-```
-
-**迁移示例**：
-```json
-// 旧配置
-{
-  "cursorUp": "k",
-  "clear": "ctrl+c"
-}
-
-// 迁移后
-{
-  "tui.editor.cursorUp": "k",
-  "app.clear": "ctrl+c"
-}
-```
-
-## 键解析
-
-### Kitty 键盘协议
-
-支持现代终端的增强键盘协议：
-
-```typescript
-let _kittyProtocolActive = false;
-
-export function setKittyProtocolActive(active: boolean): void {
-  _kittyProtocolActive = active;
-}
-
-export function isKittyProtocolActive(): boolean {
-  return _kittyProtocolActive;
-}
-```
-
-**Kitty 协议特性**：
-- 精确的修饰键状态（shift、alt、ctrl、super）
-- 区分大小写字母
-- 支持所有符号键
-- 可靠的小键盘处理
-
-### 修饰键掩码
-
-```typescript
-const MODIFIERS = {
-  shift: 1,
-  alt: 2,
-  ctrl: 4,
-  super: 8,
-} as const;
-
-const LOCK_MASK = 64 + 128;  // Caps Lock + Num Lock
-```
-
-### 键匹配
-
-```typescript
-export function matchesKey(data: string, keyId: KeyId): boolean {
-  const parsed = parseKey(data);
-  if (!parsed) return false;
-
-  const { key, modifiers } = parseKeyId(keyId);
-
-  // 检查修饰键匹配
-  if (modifiers.ctrl !== (parsed.modifiers & 4)) return false;
-  if (modifiers.shift !== (parsed.modifiers & 1)) return false;
-  if (modifiers.alt !== (parsed.modifiers & 2)) return false;
-  if (modifiers.super !== (parsed.modifiers & 8)) return false;
-
-  // 检查键匹配
-  return parsed.key === key;
-}
-```
-
-### 键解析流程
-
-```typescript
-export function parseKey(data: string): ParsedKey | undefined {
-  // 1. 尝试 Kitty 协议
-  if (_kittyProtocolActive) {
-    const kitty = parseKittyEscapeSequence(data);
-    if (kitty) return kitty;
-  }
-
-  // 2. 尝试传统转义序列
-  const legacy = parseLegacyEscapeSequence(data);
-  if (legacy) return legacy;
-
-  // 3. 尝试单个字符
-  if (data.length === 1) {
-    return parseSingleCharacter(data);
-  }
-
-  return undefined;
-}
-```
-
-**传统转义序列示例**：
-```
-输入        → 解析结果
-"\x1b[A"    → { key: "up", modifiers: 0 }
-"\x1b[1;3A" → { key: "up", modifiers: 2 } (Alt+Up)
-"\x1b[B"    → { key: "down", modifiers: 0 }
-"a"         → { key: "a", modifiers: 0 }
-"\x01"      → { key: "a", modifiers: 4 } (Ctrl+A)
-```
-
-**Kitty 协议示例**：
-```
-输入                      → 解析结果
-"\x1b[96;5u"            → { key: "f12", modifiers: 4 } (Ctrl+F12)
-"\x1b[97;3u"            → { key: "a", modifiers: 2 } (Alt+A)
-"\x1b[48;5u"            → { key: "0", modifiers: 4 } (Ctrl+0)
-```
-
-## 平台差异
-
-### Windows 特殊处理
-
-某些快捷键在 Windows 上有不同的默认值：
-
-```typescript
-"app.suspend": {
-  defaultKeys: process.platform === "win32" ? [] : "ctrl+z",
-  description: "Suspend to background"
-},
-"app.clipboard.pasteImage": {
-  defaultKeys: process.platform === "win32" ? "alt+v" : "ctrl+v",
-  description: "Paste image from clipboard"
-}
-```
-
-### Ctrl+符号键冲突
-
-某些 Ctrl+符号键组合与 ASCII 控制码重叠：
-
-```
-Ctrl+[  → ESC (ASCII 27)
-Ctrl+J  → Line Feed (ASCII 10)
-Ctrl+M  → Carriage Return (ASCII 13)
-Ctrl+I  → Tab (ASCII 9)
-```
-
-**解决方案**：
-- 使用 Ctrl+Shift 组合避免冲突
-- 例如：`Ctrl+Shift+]` 而不是 `Ctrl+]`
-
-## 最佳实践
-
-### 快捷键设计原则
-
-1. **遵循惯例**：
-   - `Ctrl+C`：复制/取消
-   - `Ctrl+V`：粘贴
-   - `Ctrl+Z`：撤销
-   - `Ctrl+S`：保存
-   - `Ctrl+F`：查找
-
-2. **避免冲突**：
-   - 不要使用系统级快捷键（如 `Alt+Tab`）
-   - 避免与应用常用快捷键冲突
-
-3. **提供备选**：
-   ```typescript
-   "tui.editor.cursorLeft": {
-     defaultKeys: ["left", "ctrl+b"],  // 箭头键 + Emacs 风格
-   }
-   ```
-
-4. **考虑平台差异**：
-   ```typescript
-   "app.suspend": {
-     defaultKeys: process.platform === "win32" ? [] : "ctrl+z"
-   }
-   ```
-
-### 自定义快捷键
-
-1. **创建配置文件**：
-```bash
-# ~/.pi/agent/keybindings.json
-{
-  "app.model.cycleForward": "ctrl+m",
-  "app.clear": "ctrl+k"
-}
-```
-
-2. **验证配置**：
-   - 重启应用或重新加载配置
-   - 检查冲突报告
-
-3. **测试快捷键**：
-   - 在实际使用场景中测试
-   - 确保没有意外覆盖重要快捷键
-
-### 调试快捷键
-
-```typescript
-import { getKeybindings, parseKey } from "@mariozechner/pi-tui";
-
-// 获取快捷键管理器
-const kb = getKeybindings();
-
-// 获取操作的键绑定
-console.log(kb.getKeys("app.clear"));  // ["ctrl+c"]
-
-// 检查输入是否匹配
-console.log(kb.matches("\x03", "app.clear"));  // true (Ctrl+C)
-
-// 解析键输入
-const parsed = parseKey("\x1b[A");
-console.log(parsed);  // { key: "up", modifiers: 0 }
-
-// 检查冲突
-console.log(kb.getConflicts());  // []
-```
-
-## 生命周期图
-
-[MermaidChart:./_LEARN/docs/mmd/keybinding-system-lifecycle.mmd]
-
-## 参考资源
-
-- **TUI 快捷键**：`/packages/tui/src/keybindings.ts:1`
-- **键解析**：`/packages/tui/src/keys.ts:1`
-- **应用快捷键**：`/packages/coding-agent/src/core/keybindings.ts:1`
-- **快捷键文档**：`/packages/coding-agent/docs/keybindings.md`
-- **迁移测试**：`/packages/coding-agent/test/keybindings-migration.test.ts:1`
-
-## 扩展阅读
-
-- [Kitty Keyboard Protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
-- [Terminal Escape Sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html)
-- [Emacs Key Bindings](https://www.gnu.org/software/emacs/manual/html_node/emacs/Key-Bindings.html)
+---
+
+## 相关源文件
+
+| 文件 | 职责 |
+|------|------|
+| `packages/tui/src/keybindings.ts` | TUI_KEYBINDINGS、基类 Manager |
+| `packages/tui/src/keys.ts` | matchesKey、Kitty 协议 |
+| `packages/coding-agent/src/core/keybindings.ts` | app.* 定义、用户配置、迁移 |
+| `packages/coding-agent/src/modes/interactive/components/custom-editor.ts` | 输入拦截链 |
+| `packages/coding-agent/src/modes/interactive/interactive-mode.ts` | action 注册、扩展 shortcut  wiring |
+| `packages/coding-agent/src/core/extensions/loader.ts` | registerShortcut |
+| `packages/coding-agent/docs/keybindings.md` | 用户文档 |

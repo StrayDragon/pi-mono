@@ -1,613 +1,307 @@
-# 核心数据流与事件流
+# 数据流与消息流
 
-> 追踪从用户输入到最终渲染的完整数据流
+## 端到端数据流
 
----
+```mermaid
+flowchart TB
+    subgraph "用户输入"
+        UI["TUI 编辑器 / stdin / RPC"]
+    end
 
-## 1. 主数据流：用户输入 → LLM 响应
+    subgraph "输入处理"
+        IP["InputEvent 分发"]
+        SK["技能检测 & 加载"]
+        IMG["图片附件处理"]
+        SP["系统提示构建"]
+    end
 
-### 1.1 完整流程图
+    subgraph "Agent 循环"
+        CTX["构建 AgentContext"]
+        TF["transformContext()<br/>上下文裁剪"]
+        CONV["convertToLlm()<br/>AgentMessage → Message"]
+        LLM_CTX["构建 LLM Context<br/>{systemPrompt, messages, tools}"]
+    end
+
+    subgraph "LLM 调用"
+        RESOLVE["解析模型 & API Key"]
+        STREAM["stream() / streamSimple()"]
+        PROVIDER["供应商实现<br/>(Anthropic/OpenAI/...)"]
+        SSE["SSE/WebSocket 流"]
+    end
+
+    subgraph "响应处理"
+        EVENTS["AssistantMessageEvent 流"]
+        PARTIAL["部分消息更新"]
+        TOOL_CALLS["提取工具调用"]
+    end
+
+    subgraph "工具执行"
+        VALIDATE["参数验证 (TypeBox)"]
+        BEFORE["beforeToolCall 钩子"]
+        EXEC["工具执行"]
+        AFTER["afterToolCall 钩子"]
+        RESULT["工具结果"]
+    end
+
+    subgraph "持久化"
+        JSONL["JSONL 写入"]
+        SESSION["会话树更新"]
+    end
+
+    UI --> IP --> SK --> SP
+    IMG --> SP
+    SP --> CTX --> TF --> CONV --> LLM_CTX
+    LLM_CTX --> RESOLVE --> STREAM --> PROVIDER --> SSE
+    SSE --> EVENTS --> PARTIAL --> TOOL_CALLS
+    TOOL_CALLS --> VALIDATE --> BEFORE --> EXEC --> AFTER --> RESULT
+    RESULT --> CTX
+    PARTIAL --> JSONL
+    RESULT --> JSONL
+```
+
+## 消息生命周期
+
+### 用户消息流
 
 ```mermaid
 sequenceDiagram
-    participant User as 用户
-    participant IS as InteractiveMode
+    participant Editor as TUI 编辑器
+    participant IM as InteractiveMode
     participant AS as AgentSession
-    participant Agent as Agent(pi-agent-core)
-    participant Loop as AgentLoop
-    participant AI as pi-ai
-    participant Provider as LLM Provider
-    participant Tool as Tool.execute()
-    participant SM as SessionManager
     participant Ext as ExtensionRunner
+    participant Agent as Agent
+    participant Loop as AgentLoop
+
+    Editor->>IM: onSubmit(text)
+    IM->>IM: 检查 slash 命令
+    IM->>IM: 检查 bash 前缀 (!/!!)
+    IM->>AS: prompt(text, images)
+    AS->>Ext: emit("input", {text, images})
+    Note over Ext: 扩展可 transform/handle
+    AS->>Ext: emit("before_agent_start", {prompt, systemPrompt})
+    Note over Ext: 扩展可修改系统提示
+    AS->>Agent: prompt([userMessage])
+    Agent->>Loop: agentLoop(prompts, context, config)
+    Loop->>Loop: emit("agent_start")
+    Loop->>Loop: emit("message_start", userMessage)
+    Loop->>Loop: emit("message_end", userMessage)
+```
+
+### 助手消息流
+
+```mermaid
+sequenceDiagram
+    participant Loop as AgentLoop
+    participant Stream as streamSimple()
+    participant Provider as 供应商
+    participant AS as AgentSession
     participant TUI as TUI
 
-    User->>IS: 输入提示词
-    IS->>IS: handleInput() 处理输入
+    Loop->>Loop: transformContext(messages)
+    Loop->>Loop: convertToLlm(messages)
+    Loop->>Stream: stream(model, llmContext, options)
+    Stream->>Provider: HTTP/WebSocket 请求
+    Provider-->>Stream: SSE 事件流
+    
+    Stream-->>Loop: {type: "start", partial}
+    Loop->>AS: emit("message_start")
+    AS->>TUI: 创建 AssistantMessageComponent
+    
+    loop 流式更新
+        Stream-->>Loop: {type: "text_delta", delta}
+        Loop->>AS: emit("message_update")
+        AS->>TUI: 增量渲染 Markdown
+    end
+    
+    Stream-->>Loop: {type: "toolcall_end", toolCall}
+    Loop->>AS: emit("message_update")
+    
+    Stream-->>Loop: {type: "done", message}
+    Loop->>AS: emit("message_end")
+    AS->>AS: 写入 JSONL
+```
 
-    IS->>AS: processInput(text)
-    AS->>AS: buildSystemPrompt()<br/>构建系统提示
+### 工具调用流
 
-    AS->>Agent: prompt(messages)
-    Agent->>Agent: runWithLifecycle()
+```mermaid
+sequenceDiagram
+    participant Loop as AgentLoop
+    participant Ext as ExtensionRunner
+    participant Tool as 工具实现
+    participant FS as 文件系统/Shell
+    participant TUI as TUI
 
-    Agent->>Loop: runAgentLoop()
+    Note over Loop: 从助手消息提取 toolCalls
+    
+    Loop->>Loop: prepareToolCall()
+    Note over Loop: 查找工具, 验证参数
+    
+    Loop->>Ext: beforeToolCall({toolCall, args})
+    Note over Ext: 扩展可 block
+    
+    alt 工具被阻止
+        Loop->>Loop: 返回错误结果
+    else 允许执行
+        Loop->>Loop: emit("tool_execution_start")
+        Loop->>TUI: 显示工具开始
+        Loop->>Tool: execute(id, params, signal, onUpdate)
+        
+        loop 部分更新
+            Tool->>Loop: onUpdate(partialResult)
+            Loop->>TUI: 显示部分输出
+        end
+        
+        Tool->>FS: 实际 I/O 操作
+        FS->>Tool: 结果
+        Tool->>Loop: return result
+    end
+    
+    Loop->>Ext: afterToolCall({toolCall, result})
+    Note over Ext: 扩展可修改结果
+    
+    Loop->>Loop: emit("tool_execution_end")
+    Loop->>Loop: 构建 ToolResultMessage
+    Loop->>Loop: emit("message_start/end", toolResult)
+```
 
-    Loop->>Loop: transformContext()<br/>应用 beforeAgentStart 钩子
+## 消息格式转换
 
-    Loop->>Loop: convertToLlm()<br/>AgentMessage[] → Message[]
+### AgentMessage → LLM Message
 
-    Loop->>AI: streamSimple(model, context, options)
-    AI->>Provider: HTTP/SSE 请求
-
-    Provider-->>AI: 流式响应事件
-    AI-->>Loop: AssistantMessageEvent
-
-    Loop-->>Agent: AgentEvent
-    Agent-->>AS: subscribe 回调
-
-    AS->>SM: appendEntry(message)<br/>持久化到 JSONL
-    AS->>Ext: emit(event)<br/>分发到扩展
-
-    Ext-->>AS: 扩展处理结果
-
-    AS->>TUI: 更新渲染<br/>显示流式输出
-
-    alt 有工具调用
-        Loop->>Tool: execute(toolCallId, params)
-        Tool-->>Loop: AgentToolResult
-
-        Loop->>Loop: 将结果加入消息队列
-        Loop->>AI: streamSimple(model, context + result)
+```mermaid
+graph LR
+    subgraph "AgentMessage 层"
+        UM["UserMessage<br/>role: user"]
+        AM["AssistantMessage<br/>role: assistant"]
+        TRM["ToolResultMessage<br/>role: toolResult"]
+        BE["BashExecutionMessage<br/>role: bashExecution"]
+        CS["CompactionSummary<br/>role: compactionSummary"]
+        BS["BranchSummary<br/>role: branchSummary"]
+        CM["CustomMessage<br/>role: custom"]
     end
 
-    AI-->>Loop: 最终响应 (done 事件)
-    Loop-->>Agent: agent_end 事件
-    Agent-->>AS: idle 状态
-    AS-->>TUI: 最终渲染
-    TUI-->>User: 显示完整响应
+    subgraph "convertToLlm()"
+        CONV["转换逻辑"]
+    end
+
+    subgraph "LLM Message 层"
+        LUM["UserMessage"]
+        LAM["AssistantMessage"]
+        LTRM["ToolResultMessage"]
+    end
+
+    UM -->|"直通"| CONV
+    AM -->|"直通"| CONV
+    TRM -->|"直通"| CONV
+    BE -->|"转为 user text"| CONV
+    CS -->|"转为 user text"| CONV
+    BS -->|"转为 user text"| CONV
+    CM -->|"按 display 配置"| CONV
+
+    CONV --> LUM
+    CONV --> LAM
+    CONV --> LTRM
 ```
 
-### 1.2 详细步骤说明
+### 跨供应商消息转换 (transform-messages.ts)
 
-#### Step 1: 用户输入处理
+当在同一会话中切换模型供应商时，`pi-ai` 层自动转换消息格式：
 
-**入口**：`/packages/coding-agent/src/modes/interactive/interactive-mode.ts`
+```mermaid
+graph TB
+    subgraph "转换操作"
+        IMG["图片降级<br/>非视觉模型"]
+        THINK["思考块转换<br/>→ &lt;thinking&gt; 文本"]
+        TOOLID["工具调用 ID 规范化"]
+        SIGN["签名清理"]
+    end
 
-```typescript
-async handleInput(text: string) {
-    // 1. 处理斜杠命令
-    if (text.startsWith("/")) {
-        return this.handleSlashCommand(text);
-    }
+    subgraph "场景"
+        S1["Anthropic → OpenAI"]
+        S2["OpenAI → Google"]
+        S3["视觉模型 → 文本模型"]
+    end
 
-    // 2. 发送到 AgentSession
-    await this.agentSession.processInput(text);
-}
+    S1 --> THINK
+    S1 --> TOOLID
+    S2 --> THINK
+    S2 --> SIGN
+    S3 --> IMG
 ```
 
-#### Step 2: 构建系统提示
+## 数据持久化流
 
-**入口**：`/packages/coding-agent/src/core/system-prompt.ts`
+```mermaid
+flowchart TB
+    subgraph "运行时"
+        MSG["消息事件"]
+        MC["模型变更"]
+        TLC["思考级别变更"]
+        COMP["压缩事件"]
+    end
 
-```typescript
-function buildSystemPrompt(tools: Tool[], skills: Skill[]): string {
-    const sections = [];
+    subgraph "SessionManager"
+        APPEND["append(entry)"]
+        TREE["更新树索引"]
+        LEAF["移动 leaf 指针"]
+    end
 
-    // 1. 工具描述
-    sections.push(formatToolsForPrompt(tools));
+    subgraph "JsonlSessionStorage"
+        WRITE["追加写入 JSONL"]
+        FILE["~/.pi/agent/sessions/<cwd-encoded>/xxx.jsonl"]
+    end
 
-    // 2. Skills 描述
-    sections.push(formatSkillsForPrompt(skills));
-
-    // 3. 能力说明
-    sections.push(CAPABILITIES_SECTION);
-
-    // 4. 规则和指南
-    sections.push(RULES_SECTION);
-
-    return sections.join("\n\n");
-}
+    MSG --> APPEND
+    MC --> APPEND
+    TLC --> APPEND
+    COMP --> APPEND
+    APPEND --> TREE --> LEAF --> WRITE --> FILE
 ```
 
-#### Step 3: Agent 处理
+### JSONL 条目格式
 
-**入口**：`/packages/agent/src/agent.ts`
-
-```typescript
-async prompt(messages: AgentMessage[]) {
-    return this.runWithLifecycle(async (state) => {
-        // 1. 更新状态
-        state.messages.push(...messages);
-
-        // 2. 运行 Agent Loop
-        return await runAgentLoop({
-            messages: state.messages,
-            tools: this.tools,
-            streamAssistant: (ctx) => this.streamAssistant(ctx)
-        });
-    });
-}
+```json
+{"id":"abc123","parentId":"def456","type":"message","timestamp":1717000000000,"data":{"role":"user","content":"修复这个 bug"}}
+{"id":"ghi789","parentId":"abc123","type":"message","timestamp":1717000001000,"data":{"role":"assistant","content":[{"type":"text","text":"好的，让我查看一下"}]}}
+{"id":"jkl012","parentId":"ghi789","type":"model_change","timestamp":1717000002000,"data":{"provider":"anthropic","model":"claude-sonnet-4-20250514"}}
 ```
 
-#### Step 4: Agent Loop
+## 上下文构建流程
 
-**入口**：`/packages/agent/src/agent-loop.ts`
-
-```typescript
-export async function* runAgentLoop(config: AgentLoopConfig) {
-    // 外层循环：处理 follow-up 消息
-    while (true) {
-        // 内层循环：流式响应 + 工具执行
-        while (true) {
-            // 1. 转换消息
-            const messages = convertToLlm(config.messages);
-
-            // 2. 流式获取响应
-            const stream = streamAssistant(messages, config);
-
-            // 3. 处理流式事件
-            for await (const event of stream) {
-                if (event.type === "toolCall") {
-                    // 4. 执行工具
-                    const results = await executeTools(event.toolCalls);
-                    // 5. 将结果加入消息队列
-                    config.messages.push(...results);
-                    // 6. 继续内层循环
-                    continue;
-                }
-                yield event;
-            }
-
-            // 7. 无更多工具，退出内层
-            break;
-        }
-
-        // 8. 检查 follow-up 消息
-        const followUps = getFollowUpMessages();
-        if (!followUps.length) break;
-
-        // 9. 加入 follow-up，继续外层
-        config.messages.push(...followUps);
-    }
-}
-```
-
-#### Step 5: LLM 调用
-
-**入口**：`/packages/ai/src/stream.ts`
-
-```typescript
-export async function* streamSimple(
-    model: Model<Api>,
-    messages: Message[],
-    options: SimpleStreamOptions
-): AsyncGenerator<AssistantMessageEvent> {
-    // 1. 获取 Provider
-    const provider = getApiProvider(model.api);
-
-    // 2. 调用 Provider 的 streamSimple
-    const stream = provider.streamSimple(model, messages, options);
-
-    // 3. 转发事件
-    for await (const event of stream) {
-        yield event;
-    }
-}
-```
-
-#### Step 6: 会话持久化
-
-**入口**：`/packages/coding-agent/src/core/session-manager.ts`
-
-```typescript
-async appendEntry(entry: SessionEntry) {
-    // 1. 写入 JSONL 文件
-    await fs.appendFile(this.sessionPath, JSON.stringify(entry) + "\n");
-
-    // 2. 更新内存中的 entries
-    this.entries.push(entry);
-}
-```
-
-#### Step 7: TUI 渲染
-
-**入口**：`/packages/tui/src/tui.ts`
-
-```typescript
-async render() {
-    // 1. 获取所有组件的渲染结果
-    const lines = this.container.render(this.width);
-
-    // 2. 与前一帧对比
-    const diff = this.computeDiff(this.lastLines, lines);
-
-    // 3. 输出变化部分
-    this.outputDiff(diff);
-
-    // 4. 保存当前帧
-    this.lastLines = lines;
-}
-```
-
----
-
-## 2. 工具执行数据流
-
-### 2.1 流程图
+从会话树路径构建 LLM 上下文：
 
 ```mermaid
 flowchart TD
-    A[AssistantMessage<br/>包含 toolCall] --> B[Agent Loop<br/>检测工具调用]
-    B --> C[prepareToolCall<br/>参数准备]
-    C --> D[validateToolArguments<br/>TypeBox 验证]
-    D --> E[beforeToolCall hook<br/>扩展可拦截/修改]
-    E --> F{被拦截?}
-    F -->|是| G[使用拦截结果]
-    F -->|否| H[Tool.execute<br/>执行工具]
-    H --> I[onUpdate 回调<br/>流式进度]
-    I --> J[afterToolCall hook<br/>扩展可修改结果]
-    J --> K[ToolResultMessage]
-    K --> L[加入消息队列]
-    L --> M[发回 LLM]
-
-    style E fill:#f5a623
-    style J fill:#f5a623
-    style F fill:#bd10e0
+    TREE["会话树"] --> PATH["提取根到叶路径"]
+    PATH --> CHECK{"路径中有压缩节点?"}
+    
+    CHECK -->|"是"| COMP["使用压缩摘要<br/>+ 压缩后的消息"]
+    CHECK -->|"否"| ALL["使用所有消息"]
+    
+    COMP --> BUILD["构建 SessionContext"]
+    ALL --> BUILD
+    
+    BUILD --> SC["SessionContext<br/>{messages, thinkingLevel, model}"]
+    SC --> TRANSFORM["transformContext()<br/>应用上下文窗口管理"]
+    TRANSFORM --> CONVERT["convertToLlm()<br/>过滤非 LLM 消息"]
+    CONVERT --> FINAL["最终 LLM Context"]
 ```
 
-### 2.2 关键代码
+## API Key 解析流程
 
-**工具包装**：`/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts`
-
-```typescript
-export function wrapToolDefinition<TDetails>(
-    definition: ToolDefinition<any, TDetails>
-): AgentTool<any, TDetails> {
-    return {
-        name: definition.name,
-        parameters: definition.parameters,
-        execute: async (toolCallId, params, signal, onUpdate) => {
-            // 调用扩展提供的 execute 函数
-            return await definition.execute(
-                toolCallId,
-                params,
-                signal,
-                onUpdate,
-                // ExtensionContext
-                ctx
-            );
-        }
-    };
-}
+```mermaid
+flowchart TD
+    START["需要 API Key"] --> CHECK1{"auth.json 中有?"}
+    CHECK1 -->|"是"| OAUTH["检查 OAuth token 有效期"]
+    OAUTH --> EXPIRED{"过期?"}
+    EXPIRED -->|"是"| REFRESH["refreshToken()"]
+    REFRESH --> USE
+    EXPIRED -->|"否"| USE["使用 token"]
+    CHECK1 -->|"否"| CHECK2{"环境变量中有?"}
+    CHECK2 -->|"是"| USE2["使用环境变量值"]
+    CHECK2 -->|"否"| CHECK3{"models.json 中配置?"}
+    CHECK3 -->|"是"| USE3["使用配置的 key"]
+    CHECK3 -->|"否"| CHECK4{"getApiKey() 动态解析?"}
+    CHECK4 -->|"是"| USE4["使用动态值"]
+    CHECK4 -->|"否"| FAIL["无可用 Key"]
 ```
-
-**工具执行**：`/packages/agent/src/agent-loop.ts`
-
-```typescript
-async function executeTools(toolCalls: ToolCall[]) {
-    const results = [];
-
-    for (const toolCall of toolCalls) {
-        // 1. 获取工具
-        const tool = tools.get(toolCall.name);
-
-        // 2. 准备参数
-        const params = tool.prepareArguments?.(toolCall.arguments) ?? toolCall.arguments;
-
-        // 3. beforeToolCall hook
-        const event = { toolCall, params };
-        await emit("beforeToolCall", event);
-        if (event.blocked) {
-            results.push(event.result);
-            continue;
-        }
-
-        // 4. 执行工具
-        const result = await tool.execute(toolCall.id, params, signal, onUpdate);
-
-        // 5. afterToolCall hook
-        await emit("afterToolCall", { toolCall, result });
-        if (event.modifiedResult) {
-            results.push(event.modifiedResult);
-        } else {
-            results.push(result);
-        }
-    }
-
-    return results;
-}
-```
-
----
-
-## 3. 会话持久化数据流
-
-### 3.1 JSONL 格式
-
-**文件位置**：`~/.pi/sessions/<session-id>.jsonl`
-
-**格式**：
-```jsonl
-{"type":"header","version":3,"id":"session-123","timestamp":1234567890}
-{"type":"message","role":"user","content":"Hello","timestamp":1234567891}
-{"type":"message","role":"assistant","content":"Hi!","timestamp":1234567892}
-{"type":"tool_call","name":"read","arguments":{"path":"./README.md"},"timestamp":1234567893}
-{"type":"tool_result","name":"read","result":{"content":"..."},"timestamp":1234567894}
-{"type":"compaction","summary":"...","firstKeptEntryId":"entry-456","timestamp":1234567900}
-```
-
-### 3.2 读写流程
-
-**写入**：
-```typescript
-// 每次事件立即追加
-await fs.appendFile(sessionPath, JSON.stringify(entry) + "\n");
-```
-
-**读取**：
-```typescript
-// 启动时加载全部条目
-const lines = await fs.readFile(sessionPath, "utf-8");
-const entries = lines.split("\n").map(line => JSON.parse(line));
-```
-
-**上下文重建**：
-```typescript
-function buildSessionContext(entries: SessionEntry[]): AgentMessage[] {
-    const messages = [];
-
-    for (const entry of entries) {
-        switch (entry.type) {
-            case "message":
-                messages.push({
-                    role: entry.role,
-                    content: entry.content,
-                    timestamp: entry.timestamp
-                });
-                break;
-            case "tool_call":
-                messages.push({
-                    role: "assistant",
-                    content: [{
-                        type: "toolCall",
-                        id: entry.id,
-                        name: entry.name,
-                        arguments: entry.arguments
-                    }]
-                });
-                break;
-            // ... 其他类型
-        }
-    }
-
-    return messages;
-}
-```
-
----
-
-## 4. 扩展事件流
-
-### 4.1 事件分发机制
-
-**入口**：`/packages/coding-agent/src/core/extensions/runner.ts`
-
-```typescript
-class ExtensionRunner {
-    async emit<TEvent extends ExtensionEvent>(event: TEvent) {
-        const results = [];
-
-        // 遍历所有扩展
-        for (const extension of this.extensions) {
-            // 获取该事件类型的处理器
-            const handlers = extension.handlers.get(event.type);
-
-            if (!handlers) continue;
-
-            // 执行所有处理器
-            for (const handler of handlers) {
-                try {
-                    const result = await handler(event);
-                    results.push(result);
-                } catch (err) {
-                    console.error(`Extension ${extension.name} error:`, err);
-                }
-            }
-        }
-
-        // 合并结果（根据事件类型）
-        return this.mergeResults(event.type, results);
-    }
-}
-```
-
-### 4.2 可取消事件
-
-某些事件允许扩展"否决"操作：
-
-```typescript
-// session_before_compact 事件示例
-interface SessionBeforeCompactEvent {
-    type: "session_before_compact";
-    session: AgentSession;
-    block: () => void;  // 调用此函数阻止压缩
-}
-
-// 扩展中
-api.on("session_before_compact", (event) => {
-    if (shouldBlockCompaction(event.session)) {
-        event.block();  // 阻止压缩
-    }
-});
-```
-
----
-
-## 5. UI 更新数据流
-
-### 5.1 事件 → 渲染映射
-
-| AgentEvent | TUI 组件 | 渲染效果 |
-|-----------|---------|---------|
-| `message_start` | Messages | 创建消息容器 |
-| `message_delta` | Messages | 追加文本内容 |
-| `tool_call_start` | ToolExecution | 显示工具调用 |
-| `tool_call_update` | ToolExecution | 更新工具参数 |
-| `tool_result` | ToolExecution | 显示工具结果 |
-| `thinking_delta` | Messages | 显示思考内容 |
-| `message_end` | Messages | 完成消息渲染 |
-
-### 5.2 差分渲染
-
-**原理**：仅输出变化的行
-
-```typescript
-function computeDiff(prev: string[], curr: string[]) {
-    const diff = [];
-
-    for (let i = 0; i < curr.length; i++) {
-        if (prev[i] !== curr[i]) {
-            diff.push({ line: i, text: curr[i] });
-        }
-    }
-
-    return diff;
-}
-
-function outputDiff(diff: Diff[]) {
-    for (const { line, text } of diff) {
-        // 移动光标到指定行
-        process.stdout.write(`\x1b[${line + 1};0H`);
-        // 清除行
-        process.stdout.write("\x1b[2K");
-        // 输出新内容
-        process.stdout.write(text);
-    }
-}
-```
-
----
-
-## 6. 关键数据结构转换
-
-### 6.1 消息转换链
-
-```
-用户输入 (string)
-  ↓
-UserMessage (AgentMessage)
-  ↓
-convertToLlm()
-  ↓
-Message (pi-ai 格式)
-  ↓
-Provider SDK 格式 (如 Anthropic Messages API)
-  ↓
-LLM Provider 响应
-  ↓
-AssistantMessageEvent
-  ↓
-AssistantMessage (AgentMessage)
-  ↓
-SessionEntry (JSONL)
-```
-
-### 6.2 工具调用转换
-
-```
-AssistantMessage.content[toolCall] (pi-ai 格式)
-  ↓
-Agent Loop
-  ↓
-ToolCall (AgentTool 格式)
-  ↓
-Tool.execute(params)
-  ↓
-AgentToolResult
-  ↓
-ToolResultMessage (AgentMessage)
-  ↓
-convertToLlm()
-  ↓
-Message (pi-ai 格式)
-  ↓
-发送给 LLM
-```
-
----
-
-## 7. 性能优化点
-
-### 7.1 流式响应
-
-- 实时显示 LLM 输出
-- 不等待完整响应
-- 减少感知延迟
-
-### 7.2 懒加载
-
-- Provider 按需加载
-- 扩展按需加载
-- 减少启动时间
-
-### 7.3 差分渲染
-
-- 仅更新变化区域
-- 减少 ANSI 转义输出
-- 提升终端性能
-
-### 7.4 上下文压缩
-
-- 智能压缩长对话
-- 保留关键信息
-- 减少 Token 消耗
-
----
-
-## 8. 调试技巧
-
-### 8.1 追踪数据流
-
-```typescript
-// 在关键位置添加日志
-console.log("[DEBUG] User input:", text);
-console.log("[DEBUG] System prompt:", systemPrompt);
-console.log("[DEBUG] Agent messages:", messages);
-console.log("[DEBUG] LLM response:", response);
-```
-
-### 8.2 检查会话文件
-
-```bash
-# 查看最新的会话
-cat ~/.pi/sessions/$(ls -t ~/.pi/sessions | head -1)
-```
-
-### 8.3 启用调试日志
-
-```bash
-# 设置环境变量
-PI_DEBUG=1 ./pi-test.sh
-```
-
----
-
-## 9. 总结
-
-pi-mono 的数据流设计特点：
-
-1. **流式优先**：实时响应，减少延迟
-2. **事件驱动**：解耦组件，支持扩展
-3. **持久化友好**：JSONL 格式，易于处理
-4. **类型安全**：完整的类型转换链
-5. **性能优化**：懒加载、差分渲染、上下文压缩
-
-理解这些数据流对于开发和调试 pi-mono 至关重要。
-
----
-
-**相关文档**：
-- [架构概览](./01-architecture-overview.md)
-- [事件系统](./04-event-system.md)
-- [Agent Loop 详解](../03-packages/02-pi-agent-core.md)

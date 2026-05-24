@@ -1,59 +1,36 @@
-
+%% 供应商/模型系统生命周期
 flowchart TD
-    subgraph Discovery["Provider Discovery"]
-        A[Load Built-in Providers] --> B[Load Custom Providers from models.json]
-        B --> C[Load Extension Providers]
-        C --> D[Register with ApiProviderRegistry]
+    subgraph "模型注册"
+        BUILTIN["pi-ai models.generated.ts<br/>内置模型"]
+        CUSTOM["~/.pi/agent/models.json<br/>自定义模型"]
+        EXT_PROV["扩展 registerProvider()<br/>扩展模型"]
+        REGISTRY["ModelRegistry<br/>统一注册表"]
     end
 
-    subgraph Registration["Provider Registration"]
-        D --> E{Provider Type?}
-        E -->|Built-in| F[Uses Lazy Loading]
-        E -->|Custom| G[Immediate Registration]
-        E -->|Extension| H[Dynamic Registration]
-        F --> I[ApiProviderRegistry]
-        G --> I
-        H --> I
+    subgraph "模型选择"
+        CLI_MODEL["CLI --model"]
+        SESSION_MODEL["会话恢复的模型"]
+        SETTINGS_MODEL["settings 默认模型"]
+        SCOPED["--models 范围模型"]
+        FALLBACK["findInitialModel() 回退"]
+        RESOLVE["最终选定模型"]
     end
 
-    subgraph ModelResolution["Model Resolution"]
-        I --> J[ModelRegistry.getAll]
-        J --> K{Has Auth?}
-        K -->|Yes| L[ModelRegistry.getAvailable]
-        K -->|No| M[Exclude from Available]
-        L --> N[Merge Built-in + Custom + Extension]
-        M --> N
+    subgraph "API Key 解析"
+        AUTH_JSON["auth.json (OAuth)"]
+        ENV_VAR["环境变量"]
+        MODELS_KEY["models.json 配置"]
+        RUNTIME["getApiKey() 动态"]
+        KEY["最终 API Key"]
     end
 
-    subgraph RequestExecution["Request Execution"]
-        N --> O[Agent Requests Model]
-        O --> P[ModelRegistry.getApiKeyAndHeaders]
-        P --> Q{Auth Available?}
-        Q -->|No| R[Return Error]
-        Q -->|Yes| S[Resolve API Key from Config]
-        S --> T[Get ApiProvider from Registry]
-        T --> U[Call provider.streamSimple]
-        U --> V{Lazy Load?}
-        V -->|Yes| W[Load Provider Module]
-        V -->|No| X[Execute Stream]
-        W --> X
-        X --> Y[Return AssistantMessageEventStream]
-    end
-
-    subgraph OAuthFlow["OAuth Flow"]
-        H --> Z{Provider has OAuth?}
-        Z -->|Yes| AA[Register OAuth Provider]
-        AA --> AB[Supports /login Command]
-        AB --> AC[Token Refresh on Request]
-        AC --> AD[Modify Models if Needed]
-        Z -->|No| AE[Standard Auth Only]
-    end
-
-    RequestExecution --> OAuthFlow
-
-    style A fill:#e1f5ff
-    style I fill:#fff4e6
-    style N fill:#f3e5f5
-    style U fill:#e8f5e9
-    style AA fill:#ffebee
-    style R fill:#ffcccc
+    BUILTIN & CUSTOM & EXT_PROV --> REGISTRY
+    CLI_MODEL --> RESOLVE
+    SESSION_MODEL --> RESOLVE
+    SETTINGS_MODEL --> RESOLVE
+    SCOPED --> RESOLVE
+    FALLBACK --> RESOLVE
+    AUTH_JSON --> KEY
+    ENV_VAR --> KEY
+    MODELS_KEY --> KEY
+    RUNTIME --> KEY

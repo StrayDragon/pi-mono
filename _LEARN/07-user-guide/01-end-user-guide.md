@@ -1,757 +1,453 @@
-# 终端用户指南 (End User Guide)
+# 终端用户完整指南
 
-## 概述
+Pi（`@earendil-works/pi-coding-agent`）是一款终端 AI 编程助手，提供交互式 TUI、非交互式打印模式，以及完整的会话树管理能力。本文档面向日常使用者，涵盖安装、认证、界面操作、快捷键、斜杠命令与高级用法。
 
-本指南面向终端用户，介绍如何使用 pi-coding-agent 提高编程效率。无需深入技术细节，只需跟随示例操作即可快速上手。
+## 整体使用流程
 
----
-
-## 安装指南
-
-### 方式 1：npm 安装（推荐）
-
-```bash
-# 全局安装
-npm install -g @mariozechner/pi-coding-agent
-
-# 验证安装
-pi --version
-# 输出: pi-coding-agent v0.70.2
-
-# 启动
-pi
-```
-
-### 方式 2：使用 npx（无需安装）
-
-```bash
-# 直接运行
-npx @mariozechner/pi-coding-agent
-
-# 或使用别名
-alias pi='npx @mariozechner/pi-coding-agent'
-pi
-```
-
-### 方式 3：从源码运行
-
-```bash
-# 克隆仓库
-git clone https://github.com/mariozechner/pi-mono.git
-cd pi-mono
-
-# 安装依赖
-npm install
-
-# 构建
-npm run build
-
-# 运行
-npm run start
+```mermaid
+flowchart TD
+    A[安装 pi] --> B{首次启动}
+    B --> C[/login 或设置 API Key/]
+    C --> D[选择模型]
+    D --> E{使用模式}
+    E -->|默认| F[交互式 TUI]
+    E -->|-p| G[打印模式]
+    E -->|--mode rpc| H[RPC 模式]
+    F --> I[输入提示 / 斜杠命令 / !bash]
+    I --> J[Agent 调用工具]
+    J --> K[查看结果 / 继续对话]
+    K --> L{会话管理}
+    L -->|继续| M[pi -c]
+    L -->|分支| N[/tree / /fork]
+    L -->|压缩| O[/compact]
 ```
 
 ---
 
-## 初次配置
+## 安装
 
-### 自动配置向导
+Pi 通过 npm 全球安装：
 
-首次运行 `pi` 时，会自动启动配置向导：
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Welcome to pi-coding-agent!
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-? Choose your LLM Provider:
-  ▸ OpenAI (GPT-4o, GPT-4o-mini)
-    Anthropic (Claude 3.5 Sonnet, Claude 3 Haiku)
-    Ollama (Local LLMs)
-    Google (Gemini Pro)
-    AWS Bedrock
-    Azure OpenAI
-    Custom
-
-? Enter your API Key:
-  sk-....................................................
-
-? Select default model:
-  ▸ gpt-4o (推荐)
-    gpt-4o-mini (快速，成本低)
-    gpt-4-turbo
-
-? Choose color mode:
-  ▸ Auto-detect
-    Truecolor
-    256-color
-
-✓ Configuration saved to ~/.pi/config.json
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
-### 手动配置
+`--ignore-scripts` 会跳过依赖的生命周期脚本；Pi 的正常 npm 安装不依赖这些脚本。
 
-如需手动配置或修改配置，编辑 `~/.pi/config.json`：
+**系统要求：** Node.js >= 22.19.0
 
-```json
-{
-  "$schema": "https://raw.githubusercontent.com/mariozechner/pi-mono/main/packages/coding-agent/src/config/schema.json",
-  "provider": "openai",
-  "apiKey": "sk-your-api-key-here",
-  "model": "gpt-4o",
-  "theme": "default",
-  "maxTokens": 8000,
-  "temperature": 0.7,
-  "compaction": {
-    "enabled": true,
-    "threshold": 0.8,
-    "minDistance": 10
-  }
-}
+```mermaid
+graph LR
+    subgraph 安装产物
+        BIN[pi 可执行文件]
+        PKG[@earendil-works/pi-coding-agent]
+    end
+    NPM[npm install -g] --> PKG
+    PKG --> BIN
+    BIN --> CFG[~/.pi/agent/]
 ```
 
-### 配置多个 Provider
+进入项目目录后启动：
 
-```json
-{
-  "provider": "openai",
-  "apiKey": "sk-openai-key",
-  "model": "gpt-4o",
-  "providers": {
-    "anthropic": {
-      "provider": "anthropic",
-      "apiKey": "sk-ant-anthropic-key",
-      "model": "claude-3-5-sonnet-20241022"
-    },
-    "ollama": {
-      "provider": "ollama",
-      "endpoint": "http://localhost:11434",
-      "model": "llama3.1"
-    }
-  }
-}
+```bash
+cd /path/to/project
+pi
 ```
 
 ---
 
-## 基础使用
+## 首次运行与 API Key 配置
 
-### 启动会话
+Pi 支持两种认证方式：**订阅 OAuth 登录** 与 **API Key**。
+
+### 方式一：订阅登录（/login）
+
+启动 pi 后输入：
+
+```text
+/login
+```
+
+可选内置订阅提供商包括 Claude Pro/Max、ChatGPT Plus/Pro（Codex）、GitHub Copilot 等。凭证保存在 `~/.pi/agent/auth.json`，过期时自动刷新。
+
+### 方式二：环境变量
 
 ```bash
-# 启动交互式会话
+export ANTHROPIC_API_KEY=sk-ant-...
 pi
-
-# 指定工作目录
-pi /path/to/project
-
-# 使用特定配置
-pi --config ~/.pi/config-work.json
-
-# 启用调试模式
-pi --debug
 ```
 
-### 界面导航
+常用环境变量示例：
 
+| 提供商 | 环境变量 |
+|--------|----------|
+| Anthropic | `ANTHROPIC_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| Google Gemini | `GEMINI_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+
+### 方式三：auth.json 存储
+
+通过 `/login` 选择 API Key 提供商，密钥会写入 `~/.pi/agent/auth.json`（权限 `0600`）。
+
+```mermaid
+flowchart LR
+    subgraph 凭证解析优先级
+        R1[运行时覆盖 setRuntimeApiKey]
+        R2[auth.json]
+        R3[环境变量]
+        R4[models.json 中的 apiKey]
+    end
+    R1 --> R2 --> R3 --> R4
+    R2 --> M[ModelRegistry 选择可用模型]
+    R3 --> M
+    R4 --> M
 ```
-┌───────────────────────────────────────────────────────────────┐
-│  pi-coding-agent v0.70.2                    [OpenAI · gpt-4o]  │
-├───────────────────────────────────────────────────────────────┤
-│                                                               │
-│  You: Create a TypeScript function to validate email          │
-│                                                               │
-│  Agent: I'll create an email validation function for you.     │
-│                                                               │
-│  function isValidEmail(email: string): boolean {              │
-│    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/           │
-│    return emailRegex.test(email)                              │
-│  }                                                             │
-│                                                               │
-│  ───────────────────────────────────────────────────────────  │
-│                                                               │
-│  > │                                                            │
-│                                                               │
-└───────────────────────────────────────────────────────────────┘
+
+认证完成后，用 `/model` 或 `Ctrl+L` 选择模型，即可开始对话。
+
+---
+
+## 交互式模式 UI 概览
+
+交互式界面由四个主要区域组成：
+
+```mermaid
+graph TB
+    subgraph TUI布局
+        H[启动头部<br/>快捷键提示 / 上下文文件 / 扩展]
+        M[消息区<br/>用户 / 助手 / 工具调用 / 通知]
+        E[编辑器<br/>边框颜色 = 思考级别]
+        F[页脚<br/>工作目录 / 会话名 / Token / 费用 / 模型]
+    end
+    H --- M --- E --- F
 ```
 
-### 键盘快捷键
+| 区域 | 内容 |
+|------|------|
+| **启动头部** | 快捷键提示、已加载的 AGENTS.md、技能、扩展、更新日志 |
+| **消息区** | 对话历史、工具调用与结果、思考块、扩展 UI |
+| **编辑器** | 输入提示；边框颜色反映当前 thinking level |
+| **页脚** | cwd、会话名称、token/缓存/费用、上下文占用、当前模型 |
 
-| 快捷键 | 功能 |
+打开 `/settings` 或扩展 UI 时，编辑器区域会被临时替换为设置面板或自定义组件。
+
+### 编辑器功能
+
+| 功能 | 操作 |
+|------|------|
+| 文件引用 | 输入 `@` 模糊搜索项目文件 |
+| 路径补全 | `Tab` |
+| 多行输入 | `Shift+Enter`（Windows Terminal 可用 `Ctrl+Enter`） |
+| 图片 | `Ctrl+V` 粘贴（Windows 为 `Alt+V`），或拖入终端 |
+| Shell 命令 | `!command` — 执行并将输出送给模型 |
+| 隐藏 Shell | `!!command` — 执行但不送给模型 |
+| 外部编辑器 | `Ctrl+G` 打开 `$VISUAL` / `$EDITOR` |
+
+---
+
+## 快捷键速查表
+
+以下为日常最高频操作。带 * 的项在默认配置中绑定不同或未绑定，可通过 `~/.pi/agent/keybindings.json` 自定义；修改后执行 `/reload` 生效。
+
+| 快捷键 | 动作 | 默认绑定 |
+|--------|------|----------|
+| `Escape` | 中断当前 Agent | 是 |
+| `Ctrl+D` | 退出 pi（编辑器为空时） | 是 |
+| `Ctrl+R` | 打开模型选择器 * | 默认 `Ctrl+L`；`Ctrl+R` 在会话列表中为「重命名」 |
+| `Ctrl+T` | 折叠/展开 thinking 块 | 是 |
+| `Ctrl+K` | 手动压缩上下文 * | 默认无；`Ctrl+K` 在编辑器中为「删除到行尾」，压缩请用 `/compact` |
+| `Ctrl+N` | 新建会话 * | 默认无；会话列表中 `Ctrl+N` 为「仅显示已命名」 |
+| `Ctrl+L` | 打开会话树 * | 默认 `Ctrl+L` 为「模型选择器」；会话树请用 `/tree` |
+
+### 其他常用默认快捷键
+
+| 快捷键 | 动作 |
 |--------|------|
-| `Enter` | 发送消息 |
-| `Ctrl+C` | 取消当前生成 |
-| `Ctrl+D` | 退出程序 |
-| `Ctrl+B` | 创建会话分支 |
-| `Ctrl+T` | 显示会话树 |
-| `Ctrl+R` | 重新生成响应 |
-| `Ctrl+U` | 清空输入 |
-| `Ctrl+W` | 删除前一个词 |
-| `Ctrl+A` | 移到行首 |
-| `Ctrl+E` | 移到行尾 |
-| `?` | 显示帮助 |
-| `Tab` | 自动补全 |
-| `↑/↓` | 浏览历史 |
+| `Ctrl+P` | 循环下一个 scoped 模型 |
+| `Ctrl+O` | 折叠/展开工具输出 |
+| `Ctrl+G` | 外部编辑器 |
+| `Enter` | 提交；Agent 运行时为 steering 队列 |
+| `Alt+Enter` | follow-up 队列 |
+| `Alt+Up` | 恢复队列消息到编辑器 |
+| `Ctrl+C` | 清空编辑器 |
+
+### 推荐 productivity 绑定
+
+若希望上表中带 * 的快捷键按「模型 / 压缩 / 新会话 / 会话树」语义工作，可在 `keybindings.json` 中配置：
+
+```json
+{
+  "app.model.select": ["ctrl+r"],
+  "app.session.new": ["ctrl+n"],
+  "app.session.tree": ["ctrl+l"]
+}
+```
+
+压缩暂无内置 `app.compact` 键位 ID，请继续使用 `/compact` 或绑定扩展命令。
+
+### 会话选择器内快捷键
+
+在 `/resume` 或 `pi -r` 打开的会话列表中：
+
+| 快捷键 | 动作 |
+|--------|------|
+| `Ctrl+P` | 切换路径显示 |
+| `Ctrl+S` | 切换排序 |
+| `Ctrl+N` | 仅显示已命名会话 |
+| `Ctrl+R` | 重命名会话 |
+| `Ctrl+D` | 删除会话 |
+
+```mermaid
+stateDiagram-v2
+    [*] --> 空闲
+    空闲 --> 流式输出: Enter 提交
+    流式输出 --> 空闲: Agent 完成
+    流式输出 --> 中断: Escape
+    中断 --> 空闲: 队列消息恢复
+    流式输出 --> 排队: Enter / Alt+Enter
+    排队 --> 流式输出: 投递 steering/followUp
+```
+
+完整快捷键列表：输入 `/hotkeys` 或查阅 [keybindings.md](../../packages/coding-agent/docs/keybindings.md)。
 
 ---
 
-## 常见任务
+## 斜杠命令
 
-### 1. 创建新功能
+在编辑器中输入 `/` 触发自动补全。扩展、技能和提示模板也会注册为斜杠命令。
 
-**任务**：创建一个 TypeScript 函数来计算数组平均值
-
-```bash
-You: Create a TypeScript function to calculate the average of an array of numbers
-
-Agent: Here's a TypeScript function to calculate the average:
-
-function calculateAverage(numbers: number[]): number {
-  if (numbers.length === 0) {
-    throw new Error("Cannot calculate average of empty array")
-  }
-
-  const sum = numbers.reduce((acc, num) => acc + num, 0)
-  return sum / numbers.length
-}
-
-// Usage examples:
-const scores = [85, 90, 78, 92, 88]
-console.log(calculateAverage(scores))  // 86.6
+```mermaid
+mindmap
+  root((斜杠命令))
+    认证
+      /login
+      /logout
+    模型
+      /model
+      /scoped-models
+    会话
+      /new
+      /resume
+      /session
+      /tree
+      /fork
+      /clone
+      /name
+    上下文
+      /compact
+      /reload
+    导出
+      /export
+      /import
+      /share
+      /copy
+    系统
+      /settings
+      /hotkeys
+      /changelog
+      /quit
 ```
 
-### 2. 读取文件
+### 内置命令一览
 
-**任务**：查看 package.json 中的依赖
+| 命令 | 说明 |
+|------|------|
+| `/login`, `/logout` | 管理 OAuth 或 API Key 凭证 |
+| `/model` | 打开模型选择 UI |
+| `/scoped-models` | 配置 Ctrl+P 循环的模型列表 |
+| `/settings` | 思考级别、主题、消息投递、传输方式 |
+| `/compact [prompt]` | 手动压缩上下文，可附自定义指令 |
+| `/new` | 新建会话 |
+| `/resume` | 浏览并恢复历史会话 |
+| `/session` | 显示会话文件、ID、消息数、token、费用 |
+| `/tree` | 在会话树中跳转并继续 |
+| `/fork` | 从 earlier 用户消息创建新会话文件 |
+| `/clone` | 复制当前活动分支到新会话文件 |
+| `/name <name>` | 设置会话显示名称 |
+| `/export [file]` | 导出为 HTML 或 JSONL |
+| `/import` | 从 JSONL 导入并恢复 |
+| `/share` | 上传私有 GitHub Gist 并生成 HTML 链接 |
+| `/copy` | 复制最后一条助手消息到剪贴板 |
+| `/reload` | 热重载 keybindings、扩展、技能、主题 |
+| `/hotkeys` | 显示全部快捷键（等同「帮助」） |
+| `/changelog` | 版本更新日志 |
+| `/quit` | 退出 pi |
 
-```bash
-You: Read package.json and list all dependencies
+扩展命令形如 `/mycommand`；技能为 `/skill:name`；提示模板为 `/templatename`。
 
-Agent: [使用 Read 工具]
+> Pi 没有内置 `/help` 或 `/tools` 命令。查看帮助用 `/hotkeys`；限制工具用 CLI 标志 `--tools read,bash,grep` 或 `--no-tools`。
 
-Found the following dependencies in package.json:
+---
 
-Dependencies:
-• typescript: ^5.3.0
-• @types/node: ^20.0.0
-• vitest: ^1.0.0
+## Bash 执行（! 与 !!）
 
-DevDependencies:
-• eslint: ^8.55.0
-• prettier: ^3.1.0
+在编辑器中以 `!` 开头可直接运行 shell 命令：
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant E as 编辑器
+    participant S as Shell
+    participant A as Agent
+
+    U->>E: !git status
+    E->>S: 执行命令
+    S-->>E: stdout/stderr
+    alt 单感叹号 !
+        E->>A: 下次 prompt 时附带输出
+    else 双感叹号 !!
+        E->>E: 仅本地执行，不送给模型
+    end
 ```
 
-### 3. 修改代码
+| 前缀 | 行为 |
+|------|------|
+| `!command` | 执行命令，输出在**下一次**发送消息时注入 LLM 上下文 |
+| `!!command` | 执行命令，**不**送给模型（适合本地检查） |
 
-**任务**：将函数改为使用箭头函数
+Agent 内置 `bash` 工具也可由模型自主调用；`!` 前缀则是用户主动执行的快捷方式。
 
-```bash
-You: Convert the calculateAverage function to an arrow function
+---
 
-Agent: [使用 Edit 工具修改代码]
+## 图片输入
 
-I've converted the function to an arrow function:
+Pi 支持多种图片输入方式：
 
-export const calculateAverage = (numbers: number[]): number => {
-  if (numbers.length === 0) {
-    throw new Error("Cannot calculate average of empty array")
-  }
-
-  const sum = numbers.reduce((acc, num) => acc + num, 0)
-  return sum / numbers.length
-}
+```mermaid
+flowchart LR
+    subgraph 输入方式
+        P[Ctrl+V 粘贴]
+        D[拖入终端]
+        A[@file.png CLI]
+        RPC[RPC images 字段]
+    end
+    P --> R[ImageContent]
+    D --> R
+    A --> R
+    RPC --> R
+    R --> LLM[发送给支持 vision 的模型]
 ```
 
-### 4. 运行测试
+- **交互式：** `Ctrl+V`（Windows：`Alt+V`）或拖入终端
+- **CLI：** `pi -p @screenshot.png "描述这张图片"`
+- **设置：** `images.autoResize` 默认将图片缩放到 2000×2000；`images.blockImages: true` 可阻止发送
 
-**任务**：运行项目中的测试套件
-
-```bash
-You: Run all tests
-
-Agent: [使用 Bash 工具执行命令]
-
-Running test suite...
-
-✓ src/utils/math.spec.ts (5/5 passed)
-✓ src/utils/string.spec.ts (8/8 passed)
-✓ src/core/agent.spec.ts (12/12 passed)
-
-Total: 25 tests passed in 2.3s
-
-All tests passing! 🎉
-```
-
-### 5. Git 操作
-
-**任务**：查看当前 Git 状态并创建提交
-
-```bash
-You: Show git status and commit changes with message "Add email validation"
-
-Agent: [使用 GitStatus 和 Bash 工具]
-
-Git Status:
-Modified files:
-• src/utils/email-validator.ts (new)
-• src/utils/email-validator.spec.ts (new)
-
-Untracked files:
-• examples/email-validation.ts
-
-Branch: main
-
-Creating commit...
-
-git add src/utils/email-validator.ts src/utils/email-validator.spec.ts
-git commit -m "Add email validation"
-
-✓ Committed successfully: Add email validation
-
-Commit hash: a1b2c3d
-```
-
-### 6. 代码审查
-
-**任务**：审查最近的代码更改
-
-```bash
-You: Review the recent changes
-
-Agent: [使用 GitDiff 和 Read 工具]
-
-Reviewing recent changes...
-
-📝 Changes in src/utils/email-validator.ts:
-
-✓ Good:
-  • Clear function name
-  • Proper type annotations
-  • Includes error handling
-
-⚠️ Suggestions:
-  • Consider adding more validation rules
-  • Add JSDoc comments for better documentation
-  • Consider international email support
-
-Overall: The implementation is solid. Consider the suggestions above for enhancement.
-```
-
-### 7. 调试代码
-
-**任务**：帮助调试一个 bug
-
-```bash
-You: I'm getting "Cannot read property 'x' of undefined" in my function
-
-Agent: Let me help you debug this issue. First, let me see the code:
-
-[读取代码]
-
-The error occurs because the function doesn't validate if the input object exists before accessing its properties. Here's the fix:
-
-function processValue(input: { x: number } | undefined): number {
-  if (!input) {
-    throw new Error("Input is required")
-  }
-
-  return input.x * 2
-}
-
-Or with optional chaining:
-
-function processValue(input?: { x: number }): number {
-  return input?.x ?? 0 * 2
-}
-```
+支持的模型在 `/model` 列表中标注 `input: ["text", "image"]`。
 
 ---
 
 ## 会话管理
 
-### 创建分支
+会话自动保存到 `~/.pi/agent/sessions/`，按工作目录组织。每个会话是 JSONL 文件，内部为树形结构（`id` / `parentId`）。
 
-```bash
-# 按 Ctrl+B 创建分支
-# 或直接输入
-You: Create a branch to explore alternative implementations
-
-Agent: ✓ Created new branch: "branch-2"
-
-You are now on branch-2. Changes here won't affect the main conversation.
+```mermaid
+graph TD
+    ROOT[根用户消息] --> A1[助手回复 A]
+    A1 --> U2[用户: 方案 A]
+    U2 --> A2[助手回复 A2]
+    A1 --> U3[用户: 方案 B]
+    U3 --> A3[助手回复 B]
+    A2 --> U4[用户: 继续...] 
+    style U4 fill:#4a9,stroke:#333
 ```
 
-### 切换分支
+`*` 标记处为当前活动叶节点。
+
+### CLI 会话选项
 
 ```bash
-You: Switch to branch-1
-
-Agent: [按 Ctrl+T 查看会话树]
-
-Session Tree:
-root
-├── branch-1 (active)
-└── branch-2
-
-✓ Switched to branch-1
-
-You: [现在在 branch-1 的上下文中]
+pi -c                  # 继续最近会话
+pi -r                  # 浏览选择历史会话
+pi --no-session        # 临时模式，不持久化
+pi --session <path|id> # 打开指定会话
+pi --fork <path|id>    # Fork 到新会话文件
 ```
 
-### 导出会话
+### 会话命令对比
+
+| 功能 | `/tree` | `/fork` | `/clone` |
+|------|---------|---------|----------|
+| 输出 | 同一会话文件 | 新会话文件 | 新会话文件 |
+| 视图 | 完整树 | 用户消息列表 | 当前活动分支 |
+| 典型用途 | 原地探索分支 | 从早期 prompt 重新开始 | 复制当前工作再实验 |
+
+`/tree` 切换分支时可选择是否为废弃分支生成摘要，保留上下文而不重放整条路径。
+
+---
+
+## 打印模式（Print Mode）
+
+非交互式单次执行，适合脚本与 CI：
 
 ```bash
-You: Export this conversation to a markdown file
+pi -p "Summarize this codebase"
+cat README.md | pi -p "Summarize this text"
+pi -p @screenshot.png "What's in this image?"
+```
 
-Agent: [使用 Write 工具]
+```mermaid
+flowchart LR
+    IN[stdin + 参数消息] --> PM[runPrintMode]
+    PM --> AG[AgentSession]
+    AG --> OUT[stdout 文本/JSON]
+    OUT --> EXIT[进程退出]
+```
 
-✓ Conversation exported to: ~/conversations/session-2024-01-15.md
+| 标志 | 说明 |
+|------|------|
+| `-p`, `--print` | 打印响应后退出 |
+| `--mode json` | 以 JSON Lines 输出全部事件 |
+| `--mode rpc` | stdin/stdout JSONL 协议（见团队集成文档） |
+
+打印模式同样读取管道 stdin 并合并到初始 prompt。限制工具示例：
+
+```bash
+pi --tools read,grep,find,ls -p "Review the code"
 ```
 
 ---
 
-## 技巧和窍门
+## 消息队列
 
-### 1. 使用精确的指令
+Agent 运行时仍可提交消息：
 
-❌ **差**：
-```
-Make the code better
-```
+| 操作 | 行为 |
+|------|------|
+| `Enter` | steering 消息 — 当前助手轮次工具执行完毕后投递 |
+| `Alt+Enter` | follow-up — Agent 完全空闲后投递 |
+| `Escape` | 中止并将队列消息退回编辑器 |
 
-✅ **好**：
-```
-Refactor the calculateAverage function to use reduce() instead of a for loop
-```
-
-### 2. 分步处理复杂任务
-
-```bash
-You: I need to add user authentication. Let's break this down:
-
-1. First, create a User type with email and password fields
-2. Then create a validateUser function
-3. Finally, create an authenticate function
-
-Let's start with step 1
-```
-
-### 3. 引用具体代码
-
-```bash
-You: Look at src/utils/email-validator.ts line 15-20 and explain the regex pattern
-
-Agent: The regex pattern `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` works as follows:
-
-• `^` - Start of string
-• `[^\s@]+` - One or more non-whitespace, non-@ characters
-• `@` - Literal @ symbol
-• `[^\s@]+` - One or more non-whitespace, non-@ characters (domain)
-• `\.` - Literal dot
-• `[^\s@]+` - One or more non-whitespace, non-@ characters (TLD)
-• `$` - End of string
-
-This ensures basic email format validation.
-```
-
-### 4. 利用上下文
-
-```bash
-# pi 会记住之前的对话
-You: Now that we have the email validation, add a function to validate phone numbers using the same pattern
-
-Agent: I'll create a similar function for phone validation:
-
-function isValidPhone(phone: string): boolean {
-  const phoneRegex = /^\d{3}-\d{3}-\d{4}$/
-  return phoneRegex.test(phone)
-}
-```
-
-### 5. 批量操作
-
-```bash
-You: For all .spec.ts files in src/utils, add a describe block at the top
-
-Agent: I'll update all test files:
-
-[批量编辑多个文件]
-
-✓ Updated 5 test files with describe blocks
-```
+在 `settings.json` 中配置 `steeringMode` 与 `followUpMode`（`all` 或 `one-at-a-time`）。
 
 ---
 
-## 最佳实践
+## 上下文文件
 
-### 1. 版本控制
+Pi 启动时自动加载项目约定：
 
-```bash
-# 在进行大规模更改前，询问 Agent
-You: Before we refactor, let's make sure we have a clean git state
+- `~/.pi/agent/AGENTS.md` — 全局
+- 从 cwd 向上至 git 根目录的 `AGENTS.md` / `CLAUDE.md`
+- 可用 `--no-context-files` 禁用
 
-Agent: [检查 Git 状态]
-
-Git status is clean with no uncommitted changes. Safe to proceed with refactoring.
-```
-
-### 2. 测试驱动开发
-
-```bash
-You: Write tests first for the email validation function, then implement it
-
-Agent: I'll create the tests first:
-
-[创建测试文件]
-
-Now let's implement the function to make these tests pass:
-
-[实现函数]
-```
-
-### 3. 代码审查
-
-```bash
-You: Review this code for potential security issues
-
-Agent: [分析代码]
-
-🔒 Security Review:
-
-Issues found:
-1. ⚠️  SQL injection risk in line 45
-2. ⚠️  Unvalidated user input in line 23
-3. ✓ Proper error handling
-
-Recommendations:
-• Use parameterized queries
-• Validate and sanitize input
-```
-
-### 4. 文档优先
-
-```bash
-You: Write JSDoc comments for this function
-
-Agent: I'll add comprehensive JSDoc documentation:
-
-/**
- * Calculates the average of an array of numbers.
- *
- * @param numbers - An array of numeric values
- * @returns The arithmetic mean of the input values
- * @throws {Error} If the input array is empty
- *
- * @example
- * ```ts
- * calculateAverage([1, 2, 3, 4, 5]) // returns 3
- * ```
- */
-function calculateAverage(numbers: number[]): number {
-  // ...
-}
-```
+系统提示词可替换为 `.pi/SYSTEM.md` 或 `~/.pi/agent/SYSTEM.md`；`APPEND_SYSTEM.md` 用于追加而非替换。
 
 ---
 
-## 故障排除
-
-### 问题 1：API 连接失败
-
-**错误**：
-```
-Error: API request failed: Failed to fetch
-```
-
-**解决方案**：
-```bash
-# 1. 检查网络连接
-ping api.openai.com
-
-# 2. 验证 API Key
-cat ~/.pi/config.json | grep apiKey
-
-# 3. 尝试使用备用 endpoint
-# 在 config.json 中设置:
-{
-  "baseURL": "https://api.openai.com/v1",
-  "timeout": 30000
-}
-```
-
-### 问题 2：内存不足
-
-**错误**：
-```
-JavaScript heap out of memory
-```
-
-**解决方案**：
-```bash
-# 增加 Node.js 内存限制
-export NODE_OPTIONS="--max-old-space-size=4096"
-pi
-
-# 或降低上下文压缩阈值
-# 在 config.json 中:
-{
-  "compaction": {
-    "threshold": 0.7,
-    "maxTokens": 4000
-  }
-}
-```
-
-### 问题 3：响应速度慢
-
-**解决方案**：
-```bash
-# 1. 使用更快的模型
-{
-  "model": "gpt-4o-mini"  // 比 gpt-4o 快 3-5 倍
-}
-
-# 2. 降低 maxTokens
-{
-  "maxTokens": 2000
-}
-
-# 3. 启用上下文压缩
-{
-  "compaction": {
-    "enabled": true
-  }
-}
-```
-
----
-
-## 进阶使用
-
-### 自定义技能
-
-创建 `~/.pi/skills/` 目录并添加自定义技能：
-
-```typescript
-// ~/.pi/skills/deploy.ts
-export default {
-  name: "deploy",
-  description: "Deploy to production",
-  trigger: /deploy\s+to\s+production/i,
-
-  handler: async (input, context) => {
-    const result = await context.tools.exec("bash", {
-      command: "npm run deploy:prod"
-    })
-
-    return {
-      success: result.success,
-      content: result.success
-        ? "Deployed to production! 🚀"
-        : `Deployment failed: ${result.error}`
-    }
-  }
-}
-```
-
-### 自定义工具
-
-```typescript
-// ~/.pi/tools/weather.ts
-export default {
-  name: "weather",
-  description: "Get weather for a location",
-
-  parameters: {
-    type: "object",
-    properties: {
-      location: {
-        type: "string",
-        description: "City name or ZIP code"
-      }
-    },
-    required: ["location"]
-  },
-
-  execute: async ({ location }) => {
-    const response = await fetch(
-      `https://api.weather.com/${location}`
-    )
-    const data = await response.json()
-
-    return {
-      success: true,
-      content: `Weather in ${location}: ${data.temp}°C`
-    }
-  }
-}
-```
-
----
-
-## 常用命令参考
+## 快速参考
 
 ```bash
-# 启动选项
-pi --help                    # 显示帮助
-pi --version                 # 显示版本
-pi --config <file>           # 使用特定配置
-pi --debug                   # 启用调试
-pi --no-color                # 禁用颜色
-pi --theme <name>            # 使用特定主题
+# 列出模型
+pi --list-models
 
-# 会话管理
-pi                           # 启动新会话
-pi --resume                  # 恢复上次会话
-pi --branch <name>           # 创建/切换分支
+# 指定模型与思考级别
+pi --model anthropic/claude-sonnet-4-20250514:high -p "Solve X"
 
-# 工具
-pi --list-tools              # 列出所有工具
-pi --list-skills             # 列出所有技能
-pi --list-extensions         # 列出所有扩展
+# 只读审查
+pi --tools read,grep,find,ls -p "Review src/"
 
-# 配置
-pi --config-wizard           # 重新运行配置向导
-pi --show-config             # 显示当前配置
-pi --reset-config            # 重置配置
+# 继续上次工作
+pi -c
 ```
 
----
-
-## 资源和帮助
-
-### 获取帮助
-
-- **内置帮助**：在 pi 中按 `?` 或输入 `help`
-- **GitHub Issues**：https://github.com/mariozechner/pi-mono/issues
-- **Discord 社区**：https://discord.gg/pi-coding-agent
-- **文档**：https://docs.pi-ai.dev
-
-### 学习资源
-
-- **快速上手**：`/LEARN/06-onboarding/01-quick-start.md`
-- **代码库导航**：`/LEARN/06-onboarding/02-codebase-navigation.md`
-- **编写扩展**：`/LEARN/06-onboarding/03-writing-extension.md`
-
----
-
-## 总结
-
-✅ 你已经学会：
-- 安装和配置 pi-coding-agent
-- 使用界面和键盘快捷键
-- 执行常见编程任务
-- 管理会话和分支
-- 应用最佳实践
-- 解决常见问题
-
-**下一步**：
-- [团队集成](./02-team-integration.md)
-- [高级配置](./03-advanced-configuration.md)
-
----
-
-## 相关链接
-
-- **开发者指南**：`/LEARN/06-onboarding/`
-- **架构概览**：`/LEARN/02-architecture/01-architecture-overview.md`
-- **扩展系统**：`/LEARN/04-subsystems/02-extension-system.md`
+更多细节见 [usage.md](../../packages/coding-agent/docs/usage.md) 与 [quickstart.md](../../packages/coding-agent/docs/quickstart.md)。

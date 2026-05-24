@@ -1,44 +1,37 @@
-sequenceDiagram
-    participant LLM as LLM
-    participant Loop as Agent Loop
-    participant Before as beforeToolCall hook
-    participant Tool as Tool.execute()
-    participant After as afterToolCall hook
-    participant UI as TUI
-
-    LLM->>Loop: AssistantMessage<br/>with toolCall
-    Loop->>Loop: prepareToolCallArguments()<br/>参数预处理
-    Loop->>Loop: validateToolArguments()<br/>TypeBox 验证
-    
-    alt Before hook exists
-        Loop->>Before: beforeToolCall(event)
-        alt Event.block() called
-            Before-->>Loop: blocked: true
-            Loop-->>LLM: ToolResultMessage<br/>error: "blocked"
-        else Normal flow
-            Before-->>Loop: blocked: false
-        end
+%% 工具系统生命周期
+flowchart TD
+    subgraph "工具注册"
+        BUILTIN["内置工具<br/>createCodingTools()"]
+        EXT_TOOL["扩展工具<br/>registerTool()"]
+        MERGE["合并到 Agent.tools"]
     end
 
-    Loop->>Tool: execute(toolCallId, params, signal, onUpdate)
-    
-    loop Tool execution
-        Tool->>Tool: do work
-        Tool->>Loop: onUpdate(partialResult)
-        Loop->>UI: render progress
+    subgraph "工具执行"
+        TC["LLM 发出 toolCall"]
+        FIND["查找工具定义"]
+        PREP["prepareArguments()"]
+        VALIDATE["validateToolArguments()<br/>TypeBox 校验"]
+        BEFORE["beforeToolCall() 钩子"]
+        EXEC["tool.execute()"]
+        UPDATE["onUpdate() 部分结果"]
+        AFTER["afterToolCall() 钩子"]
+        RESULT["ToolResultMessage"]
     end
-    
-    Tool-->>Loop: AgentToolResult
-    
-    alt After hook exists
-        Loop->>After: afterToolCall(event)
-        alt Result modified
-            After-->>Loop: modified result
-        else Original result
-            After-->>Loop: original result
-        end
+
+    subgraph "结果处理"
+        EMIT["emit(tool_execution_end)"]
+        RENDER["renderResult() UI 渲染"]
+        PERSIST["写入 JSONL"]
+        INJECT["注入 Agent 上下文"]
     end
-    
-    Loop->>Loop: createToolResultMessage()
-    Loop->>UI: emit message_end
-    Loop-->>LLM: ToolResultMessage
+
+    BUILTIN --> MERGE
+    EXT_TOOL --> MERGE
+    MERGE --> TC --> FIND --> PREP --> VALIDATE --> BEFORE
+    BEFORE -->|"block"| BLOCK_RESULT["错误结果"]
+    BEFORE -->|"allow"| EXEC
+    EXEC --> UPDATE
+    EXEC --> AFTER --> RESULT
+    RESULT --> EMIT --> RENDER
+    RESULT --> PERSIST
+    RESULT --> INJECT

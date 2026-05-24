@@ -1,963 +1,398 @@
-# 设计模式目录 (Design Patterns Catalog)
+# 设计模式索引
 
-## 概述
-
-pi-mono 项目中使用了大量经典和现代设计模式。本文档按类别列出项目中使用的主要设计模式，包括创建型、结构型、行为型模式，以及异步和响应式模式。
-
-**查找模式**：
-- 按模式名称查找（索引）
-- 按使用场景查找（目录）
-- 按源文件位置查找（交叉引用）
+本文档 catalog Pi monorepo 中使用的设计模式，每个模式附 Mermaid 图与源码位置。
 
 ---
 
-## 创建型模式 (Creational Patterns)
+## 1. Registry 模式
 
-### 1. 工厂模式 (Factory Pattern)
+**用途：** 运行时注册与查找 Provider、API 实现、模型。
 
-**意图**：通过工厂函数创建对象，隐藏创建逻辑
+```mermaid
+graph TB
+    subgraph ApiRegistry["ApiProvider Registry"]
+        REG["apiProviderRegistry: Map&lt;Api, Provider&gt;"]
+        R1["registerApiProvider()"]
+        G1["getApiProvider()"]
+        R1 --> REG
+        G1 --> REG
+    end
 
-**使用场景**：
+    subgraph ModelRegistry["Model Registry"]
+        MR["ModelRegistry"]
+        R2["registerProvider()"]
+        G2["getModel() / listModels()"]
+        MJ["models.json 合并"]
+        R2 --> MR
+        G2 --> MR
+        MJ --> MR
+    end
 
-1. **Provider 工厂** (`/packages/ai/src/api-registry.ts`)
-```typescript
-class APIRegistry {
-  private factories = new Map<string, ProviderFactory>()
+    subgraph ImagesRegistry["Images API Registry"]
+        IR["imagesApiRegistry"]
+    end
 
-  register(key: string, factory: ProviderFactory): void {
-    this.factories.set(key, factory)
-  }
-
-  create(key: string, config: Config): LLMProvider {
-    const factory = this.factories.get(key)
-    if (!factory) throw new Error(`Unknown provider: ${key}`)
-    return factory(config)
-  }
-}
-
-// 使用
-registry.register("openai", (config) => new OpenAIProvider(config))
-const provider = registry.create("openai", { apiKey: "..." })
+    STREAM["stream()"] --> G1
+    CLI["--list-models"] --> G2
 ```
 
-2. **工具工厂** (`/packages/coding-agent/src/core/tools/registry.ts`)
-```typescript
-class ToolRegistry {
-  create(config: ToolConfig): Tool {
-    switch (config.type) {
-      case "read": return new ReadTool(config)
-      case "write": return new WriteTool(config)
-      case "edit": return new EditTool(config)
-      // ...
-    }
-  }
-}
-```
+| 注册表 | 注册 API | 查找 API | 源码 |
+|--------|---------|---------|------|
+| ApiProvider | `registerApiProvider()` | `getApiProvider()` | `packages/ai/src/api-registry.ts` |
+| Model | `ModelRegistry.registerProvider()` | `getModel()`、`findModels()` | `packages/coding-agent/src/core/model-registry.ts` |
+| Images API | `registerImagesApiProvider()` | `getImagesApiProvider()` | `packages/ai/src/images-api-registry.ts` |
+| 内置 Provider | `registerBuiltins()` | 启动时自动 | `packages/ai/src/providers/register-builtins.ts` |
 
 ---
 
-### 2. 建造者模式 (Builder Pattern)
+## 2. Event Stream 模式
 
-**意图**：分步骤构建复杂对象
+**用途：** LLM 响应的异步增量 delivery。
 
-**使用场景**：
+```mermaid
+stateDiagram-v2
+    [*] --> Active: new EventStream()
+    Active --> Active: push(partial event)
+    Active --> Complete: push(done)
+    Active --> Error: push(error)
+    Complete --> [*]: result() resolved
+    Error --> [*]: result() resolved
 
-**Agent 配置构建器** (`/packages/agent/src/agent.ts`)
-```typescript
-class AgentBuilder {
-  private config: Partial<AgentConfig> = {}
-
-  withLLM(llm: LLMProvider): this {
-    this.config.llm = llm
-    return this
-  }
-
-  withTools(tools: Tool[]): this {
-    this.config.tools = tools
-    return this
-  }
-
-  withSystemPrompt(prompt: string): this {
-    this.config.systemPrompt = prompt
-    return this
-  }
-
-  build(): Agent {
-    return new Agent({
-      llm: this.config.llm ?? defaultLLM,
-      tools: this.config.tools ?? [],
-      systemPrompt: this.config.systemPrompt ?? defaultPrompt
-    })
-  }
-}
-
-// 使用
-const agent = new AgentBuilder()
-  .withLLM(openai)
-  .withTools([readTool, writeTool])
-  .withSystemPrompt("You are a helpful assistant.")
-  .build()
+    note right of Active
+        消费者 for await 或
+        等待 .result()
+    end note
 ```
+
+```mermaid
+classDiagram
+    class EventStream~T, R~ {
+        -queue: T[]
+        -waiting: resolver[]
+        -done: boolean
+        +push(event: T)
+        +end(result?: R)
+        +result(): Promise~R~
+        +[asyncIterator]()
+    }
+
+    class AssistantMessageEventStream {
+        完成条件: type=done|error
+        结果: AssistantMessage
+    }
+
+    EventStream <|-- AssistantMessageEventStream
+```
+
+| 组件 | 源码 |
+|------|------|
+| `EventStream<T, R>` | `packages/ai/src/utils/event-stream.ts` |
+| `AssistantMessageEventStream` | 同上 |
+| `createAssistantMessageEventStream()` | 同上（扩展工厂） |
+| Provider 实现 | `packages/ai/src/providers/*.ts` |
 
 ---
 
-### 3. 单例模式 (Singleton Pattern)
+## 3. Declaration Merging（声明合并）
 
-**意图**：确保全局只有一个实例
+**用途：** 在不修改上游包的情况下扩展联合类型。
 
-**使用场景**：
+```mermaid
+graph LR
+    subgraph pi-agent-core
+        CAM["interface CustomAgentMessages {}"]
+        AM["type AgentMessage = ... | CustomAgentMessages[key]"]
+    end
 
-1. **全局配置** (`/packages/coding-agent/src/config/config.ts`)
-```typescript
-class ConfigManager {
-  private static instance: ConfigManager
+    subgraph pi-coding-agent
+        MERGE["declare module '@earendil-works/pi-agent-core' {<br/>  interface CustomAgentMessages {<br/>    bashExecution: ...<br/>    custom: ...<br/>  }<br/>}"]
+    end
 
-  private constructor() {
-    // 私有构造函数
-  }
+    subgraph pi-tui
+        KB["interface Keybindings {}"]
+    end
 
-  static getInstance(): ConfigManager {
-    if (!ConfigManager.instance) {
-      ConfigManager.instance = new ConfigManager()
-    }
-    return ConfigManager.instance
-  }
-}
+    subgraph coding-agent
+        KBM["interface Keybindings extends AppKeybindings {}"]
+    end
 
-// 使用
-const config = ConfigManager.getInstance()
+    MERGE --> CAM
+    KBM --> KB
 ```
 
-2. **Theme 全局实例** (`/packages/coding-agent/src/modes/interactive/theme/theme.ts`)
-```typescript
-let globalTheme: Theme | undefined
-
-export function getGlobalTheme(): Theme {
-  if (!globalTheme) {
-    globalTheme = loadTheme(getDefaultTheme())
-  }
-  return globalTheme
-}
-
-export function setGlobalTheme(theme: Theme): void {
-  globalTheme = theme
-}
-```
+| 扩展点 | 合并位置 | 源码 |
+|--------|---------|------|
+| `CustomAgentMessages` | coding-agent | `packages/coding-agent/src/core/messages.ts` |
+| `Keybindings` | coding-agent → pi-tui | `packages/coding-agent/src/core/keybindings.ts` |
+| 示例（web-ui） | 消费者项目 | `packages/web-ui/example/src/custom-messages.ts` |
 
 ---
 
-### 4. 依赖注入 (Dependency Injection)
+## 4. Factory 模式
 
-**意图**：将依赖通过构造函数或参数传入，而非内部创建
+**用途：** 创建工具、会话、Agent 实例，隐藏组装细节。
 
-**使用场景**：
+```mermaid
+flowchart TB
+    subgraph Tool Factories
+        CR["createReadTool()"]
+        CB["createBashTool()"]
+        CE["createEditTool()"]
+        CTD["createXxxToolDefinition()"]
+    end
 
-**Agent 依赖注入** (`/packages/agent/src/agent.ts`)
-```typescript
-class Agent {
-  constructor(
-    private llm: LLMProvider,          // 注入
-    private tools: ToolRegistry,       // 注入
-    private events: EventStream,       // 注入
-    private storage: Storage           // 注入
-  ) { }
-}
+    subgraph Session Factories
+        CAS["createAgentSession()"]
+        CASS["createAgentSessionServices()"]
+        CASR["createAgentSessionRuntime()"]
+    end
 
-// 使用时注入具体实现
-const agent = new Agent(
-  new OpenAIProvider(apiKey),
-  new ToolRegistry(),
-  new MemoryEventStream(),
-  new FileStorage("/tmp/sessions")
-)
+    subgraph Stream Factories
+        CAES["createAssistantMessageEventStream()"]
+    end
+
+    SDK["SDK / CLI"] --> CAS
+    CAS --> CASS
+    CASS --> AgentSession
+    CTD --> wrapToolDefinition --> AgentTool
 ```
+
+| 工厂 | 产出 | 源码 |
+|------|------|------|
+| `createReadTool()` 等 | `AgentTool` | `packages/coding-agent/src/core/tools/*.ts` |
+| `createXxxToolDefinition()` | `ToolDefinition`（扩展用） | 同上 |
+| `createAgentSession()` | `{ session, ... }` | `packages/coding-agent/src/core/sdk.ts` |
+| `createAgentSessionServices()` | 服务容器 | `packages/coding-agent/src/core/agent-session-services.ts` |
+| `defineTool()` | 类型安全的扩展工具 | `packages/coding-agent/src/core/extensions/types.ts` |
 
 ---
 
-## 结构型模式 (Structural Patterns)
+## 5. Plugin / Extension 模式
 
-### 5. 适配器模式 (Adapter Pattern)
+**用途：** 用户 TS 模块在运行时注册工具、命令、Provider、UI。
 
-**意图**：将不兼容的接口转换为兼容的接口
+```mermaid
+sequenceDiagram
+    participant Loader as Extension Loader
+    participant Jiti as jiti
+    participant Factory as ExtensionFactory
+    participant API as ExtensionAPI
+    participant Runner as ExtensionRunner
 
-**使用场景**：
-
-**Provider 适配器** (`/packages/ai/src/providers/`)
-```typescript
-// OpenAI API 的适配
-class OpenAIAdapter implements LLMProvider {
-  private client: OpenAI
-
-  constructor(apiKey: string) {
-    this.client = new OpenAI({ apiKey })
-  }
-
-  async *chat(messages: Message[], options: Options): AsyncGenerator<Chunk> {
-    // 将统一格式转换为 OpenAI 格式
-    const openaiMessages = messages.map(toOpenAIMessage)
-
-    // 调用 OpenAI API
-    const stream = await this.client.chat.completions.create({
-      messages: openaiMessages,
-      stream: true
-    })
-
-    // 将 OpenAI 响应转换为统一格式
-    for await (const chunk of stream) {
-      yield fromOpenAIChunk(chunk)
-    }
-  }
-}
+    Loader->>Jiti: import(extension.ts)
+    Jiti->>Factory: default export function(pi)
+    Factory->>API: pi.registerTool()
+    Factory->>API: pi.on("session_start")
+    Factory->>API: pi.registerCommand()
+    API->>Runner: 注册 handler
+    Note over Runner: 生命周期事件触发 handler
 ```
 
-**终端 UI 适配器** (`/packages/tui/src/adapters/`)
-```typescript
-// Kitty 协议适配
-class KittyKeyAdapter implements KeyInputAdapter {
-  parse(sequence: string): Key | null {
-    if (sequence.startsWith("\x1b[")) {
-      // 解析 Kitty 转义序列
-      return parseKittySequence(sequence)
-    }
-    return null
-  }
-}
-```
+| 概念 | 类型/接口 | 源码 |
+|------|----------|------|
+| `ExtensionFactory` | `(pi: ExtensionAPI) => void \| Promise<void>` | `packages/coding-agent/src/core/extensions/types.ts` |
+| `ExtensionAPI` | 注册/订阅/UI 上下文 | 同上 |
+| Loader | jiti + virtualModules | `packages/coding-agent/src/core/extensions/loader.ts` |
+| Runner | 事件分发 | `packages/coding-agent/src/core/extensions/runner.ts` |
+
+示例：`packages/coding-agent/examples/extensions/hello.ts`
 
 ---
 
-### 6. 装饰器模式 (Decorator Pattern)
+## 6. Result 类型模式
 
-**意图**：动态添加功能，不修改原始对象
+**用途：** 可预期失败以值返回，而非 throw。
 
-**使用场景**：
+```mermaid
+flowchart LR
+    OP["ExecutionEnv.readTextFile()"]
+    R{"Result&lt;T, E&gt;"}
+    OK["{ ok: true, value }"]
+    ERR["{ ok: false, error }"]
 
-**LLM 响应缓存装饰器** (`/packages/ai/src/cache.ts`)
-```typescript
-class CachedLLM implements LLMProvider {
-  constructor(
-    private llm: LLMProvider,
-    private cache: Cache
-  ) { }
+    OP --> R
+    R --> OK
+    R --> ERR
 
-  async *chat(messages: Message[], options: Options): AsyncGenerator<Chunk> {
-    const cacheKey = this.hashMessages(messages)
-
-    // 检查缓存
-    const cached = await this.cache.get(cacheKey)
-    if (cached) {
-      yield* cached
-      return
-    }
-
-    // 调用原始 LLM
-    const chunks: Chunk[] = []
-    for await (const chunk of this.llm.chat(messages, options)) {
-      chunks.push(chunk)
-      yield chunk
-    }
-
-    // 缓存结果
-    await this.cache.set(cacheKey, chunks)
-  }
-}
-
-// 使用
-const cachedLLM = new CachedLLM(
-  new OpenAIProvider(apiKey),
-  new MemoryCache()
-)
+    OK --> USE["getOrThrow / 模式匹配"]
+    ERR --> HANDLE["结构化错误处理"]
 ```
 
-**重试装饰器** (`/packages/ai/src/retry.ts`)
 ```typescript
-class RetryLLM implements LLMProvider {
-  constructor(
-    private llm: LLMProvider,
-    private maxRetries: number = 3
-  ) { }
-
-  async *chat(messages: Message[], options: Options): AsyncGenerator<Chunk> {
-    let lastError: Error
-
-    for (let attempt = 0; attempt < this.maxRetries; attempt++) {
-      try {
-        yield* this.llm.chat(messages, options)
-        return
-      } catch (error) {
-        lastError = error
-        await this.backoff(attempt)
-      }
-    }
-
-    throw lastError
-  }
-}
+// packages/agent/src/harness/types.ts
+type Result<T, E> = { ok: true; value: T } | { ok: false; error: E };
+function ok<T, E>(value: T): Result<T, E>;
+function err<T, E>(error: E): Result<T, E>;
 ```
+
+| 使用处 | 源码 |
+|--------|------|
+| `ExecutionEnv` 全部文件/进程操作 | `packages/agent/src/harness/types.ts` |
+| Node.js 实现 | `packages/agent/src/harness/env/nodejs.ts` |
+| `AuthStorage.withLock` | `packages/coding-agent/src/core/auth-storage.ts`（内部 LockResult） |
 
 ---
 
-### 7. 代理模式 (Proxy Pattern)
+## 7. Observer 模式
 
-**意图**：控制对对象的访问
+**用途：** Agent 状态变化、会话事件、扩展钩子的订阅/通知。
 
-**使用场景**：
+```mermaid
+graph TB
+    subgraph Agent Observer
+        AG["Agent"]
+        SUB["subscribe(listener)"]
+        EV["AgentEvent"]
+        AG --> SUB
+        SUB --> EV
+    end
 
-**权限检查代理** (`/packages/coding-agent/src/core/tools/proxy.ts`)
-```typescript
-class ToolProxy implements Tool {
-  constructor(
-    private tool: Tool,
-    private permissions: PermissionChecker
-  ) { }
+    subgraph Session Observer
+        AS["AgentSession"]
+        SE["AgentSessionEvent"]
+        AS --> SE
+    end
 
-  get name() { return this.tool.name }
-  get description() { return this.tool.description }
+    subgraph Extension Observer
+        PI["pi.on(event, handler)"]
+        RUN["ExtensionRunner.emit()"]
+        RUN --> PI
+    end
 
-  async execute(args: unknown): Promise<ToolResult> {
-    // 执行前检查权限
-    const hasPermission = await this.permissions.check(
-      this.tool.name,
-      args
-    )
-
-    if (!hasPermission) {
-      throw new Error(`Permission denied for tool: ${this.tool.name}`)
-    }
-
-    // 调用原始工具
-    return this.tool.execute(args)
-  }
-}
+    EV --> UI["InteractiveMode 渲染"]
+    SE --> UI
+    PI --> EXT["扩展逻辑"]
 ```
 
-**会话加载代理** (`/packages/coding-agent/src/core/session-proxy.ts`)
-```typescript
-class SessionProxy implements AgentSession {
-  private loaded = false
-  private session?: AgentSession
-
-  constructor(private path: string) { }
-
-  private async ensureLoaded() {
-    if (!this.loaded) {
-      this.session = await loadSession(this.path)
-      this.loaded = true
-    }
-  }
-
-  async getEntries(): Promise<Entry[]> {
-    await this.ensureLoaded()
-    return this.session!.getEntries()
-  }
-
-  // 延迟加载会话数据
-}
-```
+| 订阅 API | 事件类型 | 源码 |
+|----------|---------|------|
+| `Agent.subscribe()` | `AgentEvent` | `packages/agent/src/agent.ts` |
+| `AgentSession` 事件 | `AgentSessionEvent` | `packages/coding-agent/src/core/agent-session.ts` |
+| `pi.on()` | 20+ 扩展事件 | `packages/coding-agent/src/core/extensions/types.ts` |
+| `EventBus` | 内部 pub/sub | `packages/coding-agent/src/core/event-bus.ts` |
 
 ---
 
-### 8. 桥接模式 (Bridge Pattern)
+## 8. Strategy 模式
 
-**意图**：分离抽象和实现，独立变化
+**用途：** 运行时切换 LLM 传输策略、工具执行模式。
 
-**使用场景**：
+```mermaid
+graph TB
+    subgraph StreamFn Strategy
+        AL["AgentLoop"]
+        SF["StreamFn 注入"]
+        S1["streamSimple"]
+        S2["streamProxy"]
+        S3["faux mock"]
+        AL --> SF
+        SF --> S1 & S2 & S3
+    end
 
-**主题渲染桥接** (`/packages/tui/src/theme/bridge.ts`)
-```typescript
-// 抽象：渲染接口
-interface ThemeRenderer {
-  renderText(text: string, style: TextStyle): string
-  renderBox(lines: string[], style: BoxStyle): string
-}
+    subgraph ToolExecutionMode Strategy
+        TC["Tool Call"]
+        MODE{"ToolExecutionMode"}
+        SYNC["sync 阻塞"]
+        ASYNC["async 并行"]
+        TC --> MODE
+        MODE --> SYNC & ASYNC
+    end
+```
 
-// 实现 1：真彩色渲染器
-class TruecolorRenderer implements ThemeRenderer {
-  renderText(text: string, style: TextStyle): string {
-    const fg = this.toRGB(style.foreground)
-    return `\x1b[38;2;${fg.r};${fg.g};${fg.b}m${text}\x1b[0m`
-  }
-}
+| 策略 | 配置点 | 源码 |
+|------|--------|------|
+| `StreamFn` | `Agent` 构造 / `createAgentSession({ streamFn })` | `packages/agent/src/types.ts` |
+| `ToolExecutionMode` | Agent 配置 / 扩展 | `packages/agent/src/types.ts` |
+| `QueueMode`（steering/followUp） | Settings `steeringMode` / `followUpMode` | `packages/coding-agent/src/core/settings-manager.ts` |
 
-// 实现 2：256 色渲染器
-class Color256Renderer implements ThemeRenderer {
-  renderText(text: string, style: TextStyle): string {
-    const index = this.to256(style.foreground)
-    return `\x1b[38;5;${index}m${text}\x1b[0m`
-  }
-}
+---
 
-// 桥接：主题使用渲染接口
-class Theme {
-  constructor(private renderer: ThemeRenderer) { }
+## 9. Builder 模式
 
-  highlight(text: string, color: string): string {
-    return this.renderer.renderText(text, { foreground: color })
-  }
-}
+**用途：** 分步构建 system prompt，组合工具说明、技能、上下文文件。
 
-// 使用
-const theme = new Theme(
-  detectTruecolorSupport()
-    ? new TruecolorRenderer()
-    : new Color256Renderer()
-)
+```mermaid
+flowchart TB
+    OPT["BuildSystemPromptOptions"]
+    OPT --> CWD["cwd"]
+    OPT --> TOOLS["selectedTools"]
+    OPT --> SKILLS["skills[]"]
+    OPT --> CTX["contextFiles[]"]
+    OPT --> APPEND["appendSystemPrompt"]
+    OPT --> CUSTOM["customPrompt?"]
+
+    CWD & TOOLS & SKILLS & CTX & APPEND --> BUILD["buildSystemPrompt()"]
+    CUSTOM -->|"若存在"| OVERRIDE["完全替换默认模板"]
+    BUILD --> PROMPT["最终 system prompt 字符串"]
+    OVERRIDE --> PROMPT
+```
+
+| 组件 | 源码 |
+|------|------|
+| `BuildSystemPromptOptions` | `packages/coding-agent/src/core/system-prompt.ts` |
+| `buildSystemPrompt()` | 同上 |
+| `formatSkillsForPrompt()` | `packages/coding-agent/src/core/skills.ts` |
+| 扩展 hook | `pi.on("before_agent_start")` 可修改 prompt |
+
+---
+
+## 10. Queue 模式
+
+**用途：** 串行化文件 mutation；排队 steering/follow-up 消息。
+
+```mermaid
+graph TB
+    subgraph File Mutation Queue
+        T1["edit(path=A)"]
+        T2["write(path=A)"]
+        Q["withFileMutationQueue(A)"]
+        T1 --> Q
+        T2 --> Q
+        Q --> SERIAL["同路径串行"]
+    end
+
+    subgraph Message Queues
+        STEER["Steering Queue<br/>流式期间 Enter 排队"]
+        FOLLOW["Follow-up Queue<br/>Alt+Enter 排队"]
+        MODE{"one-at-a-time | all"}
+        STEER --> MODE
+        FOLLOW --> MODE
+        MODE --> LOOP["下一轮 AgentLoop 注入"]
+    end
+```
+
+| 队列 | API | 源码 |
+|------|-----|------|
+| 文件 mutation | `withFileMutationQueue(path, fn)` | `packages/coding-agent/src/core/tools/file-mutation-queue.ts` |
+| Steering | `session.steer()` / Enter while streaming | `packages/coding-agent/src/core/agent-session.ts` |
+| Follow-up | `session.followUp()` / Alt+Enter | 同上 |
+| 队列模式 | `steeringMode`、`followUpMode` settings | `packages/coding-agent/src/core/settings-manager.ts` |
+
+---
+
+## 模式关系总览
+
+```mermaid
+graph TB
+    REG["Registry"] --> STREAM["Event Stream"]
+    FACT["Factory"] --> EXT["Plugin/Extension"]
+    EXT --> OBS["Observer"]
+    OBS --> STRAT["Strategy"]
+    BUILD["Builder"] --> PROMPT["System Prompt"]
+    QUEUE["Queue"] --> TOOLS["Tool Execution"]
+    MERGE["Declaration Merge"] --> TYPES["Type System"]
+    RESULT["Result"] --> ENV["ExecutionEnv"]
+
+    STREAM --> UI["TUI 渲染"]
+    EXT --> REG
+    FACT --> REG
 ```
 
 ---
 
-### 9. 组合模式 (Composite Pattern)
-
-**意图**：统一处理单个对象和组合对象
-
-**使用场景**：
-
-**UI 组件树** (`/packages/tui/src/components/composite.ts`)
-```typescript
-interface UIComponent {
-  render(): string
-  handleInput(key: Key): boolean
-}
-
-// 叶子组件：按钮
-class Button implements UIComponent {
-  constructor(
-    private label: string,
-    private onPress: () => void
-  ) { }
-
-  render(): string {
-    return `[ ${this.label} ]`
-  }
-
-  handleInput(key: Key): boolean {
-    if (key.key === "Enter") {
-      this.onPress()
-      return true
-    }
-    return false
-  }
-}
-
-// 组合组件：容器
-class Container implements UIComponent {
-  private children: UIComponent[] = []
-
-  add(component: UIComponent): void {
-    this.children.push(component)
-  }
-
-  render(): string {
-    return this.children.map(c => c.render()).join("\n")
-  }
-
-  handleInput(key: Key): boolean {
-    for (const child of this.children) {
-      if (child.handleInput(key)) {
-        return true
-      }
-    }
-    return false
-  }
-}
-```
-
-**会话树组合** (`/packages/coding-agent/src/core/session/tree.ts`)
-```typescript
-interface SessionNode {
-  id: string
-  parent?: SessionNode
-  children: SessionNode[]
-}
-
-class Entry implements SessionNode {
-  constructor(
-    public id: string,
-    public parent: SessionNode | undefined,
-    public children: SessionNode[] = []
-  ) { }
-
-  // 统一处理单个条目和树
-  traverse(visitor: (node: SessionNode) => void): void {
-    visitor(this)
-    for (const child of this.children) {
-      child.traverse(visitor)
-    }
-  }
-}
-```
-
----
-
-## 行为型模式 (Behavioral Patterns)
-
-### 10. 策略模式 (Strategy Pattern)
-
-**意图**：定义算法族，可互换使用
-
-**使用场景**：
-
-**压缩策略** (`/packages/coding-agent/src/core/compaction/strategies.ts`)
-```typescript
-interface CompactionStrategy {
-  shouldCompact(session: AgentSession): boolean
-  findCutPoint(entries: Entry[]): number
-  generateSummary(entries: Entry[]): Promise<string>
-}
-
-// 策略 1：基于令牌数的压缩
-class TokenBasedCompaction implements CompactionStrategy {
-  constructor(private threshold: number) { }
-
-  shouldCompact(session: AgentSession): boolean {
-    return calculateTokens(session) > this.threshold
-  }
-
-  findCutPoint(entries: Entry[]): number {
-    // 实现基于令牌的切点查找
-  }
-
-  generateSummary(entries: Entry[]): Promise<string> {
-    // 实现摘要生成
-  }
-}
-
-// 策略 2：基于消息数的压缩
-class MessageBasedCompaction implements CompactionStrategy {
-  constructor(private maxMessages: number) { }
-
-  shouldCompact(session: AgentSession): boolean {
-    return session.entries.length > this.maxMessages
-  }
-
-  findCutPoint(entries: Entry[]): number {
-    return entries.length - this.maxMessages
-  }
-
-  generateSummary(entries: Entry[]): Promise<string> {
-    return Promise.resolve(`Compacted ${entries.length} messages`)
-  }
-}
-
-// 使用
-const strategy = config.useTokenCount
-  ? new TokenBasedCompaction(8000)
-  : new MessageBasedCompaction(100)
-```
-
----
-
-### 11. 观察者模式 (Observer Pattern)
-
-**意图**：一对多依赖，状态变化时通知所有观察者
-
-**使用场景**：
-
-**事件流** (`/packages/agent/src/events.ts`)
-```typescript
-class EventStream<T> {
-  private listeners = new Set<(event: T) => void>()
-
-  on(listener: (event: T) => void): () => void {
-    this.listeners.add(listener)
-    return () => this.listeners.delete(listener)
-  }
-
-  emit(event: T): void {
-    for (const listener of this.listeners) {
-      listener(event)
-    }
-  }
-}
-
-// Agent 使用事件流
-class Agent {
-  readonly events = new EventStream<AgentEvent>()
-
-  async chat(message: string): Promise<Response> {
-    this.events.emit({ type: "start", timestamp: Date.now() })
-
-    try {
-      const response = await this.llm.chat([message])
-      this.events.emit({ type: "complete", timestamp: Date.now() })
-      return response
-    } catch (error) {
-      this.events.emit({ type: "error", error, timestamp: Date.now() })
-      throw error
-    }
-  }
-}
-
-// 订阅事件
-agent.events.on(event => {
-  if (event.type === "error") {
-    logger.error("Agent error:", event.error)
-  }
-})
-```
-
-**主题热重载** (`/packages/coding-agent/src/modes/interactive/theme/theme.ts`)
-```typescript
-class ThemeManager {
-  private watchers = new Set<(theme: Theme) => void>()
-
-  subscribe(callback: (theme: Theme) => void): () => void {
-    this.watchers.add(callback)
-    return () => this.watchers.delete(callback)
-  }
-
-  async loadTheme(path: string): Promise<Theme> {
-    const theme = await loadThemeFile(path)
-    this.notify(theme)
-    return theme
-  }
-
-  private notify(theme: Theme): void {
-    for (const callback of this.watchers) {
-      callback(theme)
-    }
-  }
-}
-```
-
----
-
-### 12. 命令模式 (Command Pattern)
-
-**意图**：将请求封装为对象
-
-**使用场景**：
-
-**撤销/重做** (`/packages/coding-agent/src/core/commands.ts`)
-```typescript
-interface Command {
-  execute(): Promise<void>
-  undo?(): Promise<void>
-}
-
-class EditFileCommand implements Command {
-  constructor(
-    private path: string,
-    private edits: Edit[],
-    private backup?: string
-  ) { }
-
-  async execute(): Promise<void> {
-    // 创建备份
-    this.backup = await fs.readFile(this.path, "utf-8")
-
-    // 应用编辑
-    await applyEdits(this.path, this.edits)
-  }
-
-  async undo(): Promise<void> {
-    if (this.backup) {
-      await fs.writeFile(this.path, this.backup)
-    }
-  }
-}
-
-// 命令历史
-class CommandHistory {
-  private history: Command[] = []
-  private current = -1
-
-  async execute(command: Command): Promise<void> {
-    // 移除重做历史
-    this.history = this.history.slice(0, this.current + 1)
-
-    await command.execute()
-    this.history.push(command)
-    this.current++
-  }
-
-  async undo(): Promise<void> {
-    if (this.current >= 0) {
-      const command = this.history[this.current]
-      await command.undo?.()
-      this.current--
-    }
-  }
-
-  async redo(): Promise<void> {
-    if (this.current < this.history.length - 1) {
-      this.current++
-      const command = this.history[this.current]
-      await command.execute()
-    }
-  }
-}
-```
-
----
-
-### 13. 状态模式 (State Pattern)
-
-**意图**：对象行为随内部状态变化
-
-**使用场景**：
-
-**Agent 状态** (`/packages/agent/src/agent-states.ts`)
-```typescript
-interface AgentState {
-  enter(agent: Agent): void
-  exit(agent: Agent): void
-  handleInput(agent: Agent, input: string): Promise<void>
-}
-
-class IdleState implements AgentState {
-  enter(agent: Agent): void {
-    agent.showPrompt()
-  }
-
-  exit(agent: Agent): void {
-    agent.hidePrompt()
-  }
-
-  async handleInput(agent: Agent, input: string): Promise<void> {
-    agent.transition(new ThinkingState())
-    await agent.process(input)
-  }
-}
-
-class ThinkingState implements AgentState {
-  enter(agent: Agent): void {
-    agent.showSpinner()
-  }
-
-  exit(agent: Agent): void {
-    agent.hideSpinner()
-  }
-
-  async handleInput(agent: Agent, input: string): Promise<void> {
-    // 忽略输入，正在思考
-  }
-}
-
-// Agent 状态机
-class Agent {
-  private state: AgentState = new IdleState()
-
-  transition(state: AgentState): void {
-    this.state.exit(this)
-    this.state = state
-    this.state.enter(this)
-  }
-
-  async handleInput(input: string): Promise<void> {
-    await this.state.handleInput(this, input)
-  }
-}
-```
-
----
-
-### 14. 迭代器模式 (Iterator Pattern)
-
-**意图**：遍历集合对象
-
-**使用场景**：
-
-**会话条目迭代** (`/packages/coding-agent/src/core/session/iterator.ts`)
-```typescript
-interface SessionIterator<T> {
-  next(): IteratorResult<T>
-  [Symbol.iterator](): SessionIterator<T>
-}
-
-class EntryIterator implements SessionIterator<Entry> {
-  private index = 0
-
-  constructor(
-    private entries: Entry[],
-    private filter?: (entry: Entry) => boolean
-  ) { }
-
-  next(): IteratorResult<Entry> {
-    while (this.index < this.entries.length) {
-      const entry = this.entries[this.index++]
-
-      if (!this.filter || this.filter(entry)) {
-        return { done: false, value: entry }
-      }
-    }
-
-    return { done: true, value: undefined }
-  }
-
-  [Symbol.iterator]() {
-    return this
-  }
-}
-
-// 使用
-for (const entry of new EntryIterator(session.entries, e => e.type === "message")) {
-  console.log(entry.message.content)
-}
-```
-
----
-
-### 15. 模板方法模式 (Template Method Pattern)
-
-**意图**：定义算法骨架，子类实现细节
-
-**使用场景**：
-
-**Provider 基类** (`/packages/ai/src/providers/base.ts`)
-```typescript
-abstract class BaseProvider implements LLMProvider {
-  abstract formatMessages(messages: Message[]): unknown
-  abstract parseResponse(response: unknown): Message
-
-  async *chat(messages: Message[], options: Options): AsyncGenerator<Chunk> {
-    // 模板方法：定义流程
-    const formatted = this.formatMessages(messages)
-    const rawResponse = await this.doRequest(formatted, options)
-
-    for await (const chunk of this.streamResponse(rawResponse)) {
-      yield this.parseChunk(chunk)
-    }
-  }
-
-  protected abstract doRequest(formatted: unknown, options: Options): Promise<unknown>
-  protected abstract *streamResponse(response: unknown): Generator<unknown>
-  protected abstract parseChunk(chunk: unknown): Chunk
-}
-
-// 子类实现细节
-class OpenAIProvider extends BaseProvider {
-  formatMessages(messages: Message[]): OpenAIMessage[] {
-    return messages.map(toOpenAIFormat)
-  }
-
-  protected async doRequest(formatted: OpenAIMessage[]): Promise<OpenAIResponse> {
-    return this.client.chat.completions.create({ messages: formatted })
-  }
-
-  // ...
-}
-```
-
----
-
-## 异步模式 (Async Patterns)
-
-### 16. 异步生成器模式 (Async Generator Pattern)
-
-**意图**：流式处理异步数据
-
-**使用场景**：
-
-**流式聊天** (`/packages/ai/src/stream.ts`)
-```typescript
-async function* streamChat(
-  llm: LLMProvider,
-  messages: Message[]
-): AsyncGenerator<MessageChunk> {
-  const response = await llm.chat(messages, { stream: true })
-
-  for await (const chunk of response) {
-    if (chunk.choices?.[0]?.delta?.content) {
-      yield {
-        content: chunk.choices[0].delta.content,
-        done: false
-      }
-    }
-  }
-
-  yield { content: "", done: true }
-}
-
-// 使用
-for await (const chunk of streamChat(llm, messages)) {
-  if (!chunk.done) {
-    process.stdout.write(chunk.content)
-  }
-}
-```
-
----
-
-### 17. Promise 链模式 (Promise Chain Pattern)
-
-**意图**：顺序执行异步操作
-
-**使用场景**：
-
-**扩展加载链** (`/packages/coding-agent/src/core/extensions/loader.ts`)
-```typescript
-async function loadExtension(ext: Extension): Promise<void> {
-  // 顺序执行加载步骤
-  await validateExtension(ext)
-  await resolveDependencies(ext)
-  await registerTools(ext.tools ?? [])
-  await registerSkills(ext.skills ?? [])
-  await ext.hooks?.onLoad?.()
-}
-```
-
----
-
-## 响应式模式 (Reactive Patterns)
-
-### 18. Reactor 模式 (Reactor Pattern)
-
-**意图**：事件驱动处理
-
-**使用场景**：
-
-**TUI 事件循环** (`/packages/tui/src/tui.ts`)
-```typescript
-class TUI {
-  private handlers = new Map<Key, Handler>()
-
-  onKey(key: Key, handler: Handler): void {
-    this.handlers.set(key, handler)
-  }
-
-  async run(): Promise<void> {
-    // 事件循环
-    for await (const event of this.stdin) {
-      const key = parseKey(event)
-
-      const handler = this.handlers.get(key)
-      if (handler) {
-        await handler(key)
-      }
-
-      this.render()
-    }
-  }
-}
-```
-
----
-
-## 总结
-
-| 模式 | 类别 | 主要使用场景 | 源文件位置 |
-|------|------|--------------|-----------|
-| 工厂模式 | 创建型 | Provider/Tool 创建 | `ai/src/api-registry.ts` |
-| 建造者模式 | 创建型 | Agent 配置构建 | `agent/src/agent.ts` |
-| 单例模式 | 创建型 | 全局配置/Theme | `coding-agent/src/config/` |
-| 依赖注入 | 创建型 | Agent 依赖管理 | `agent/src/agent.ts` |
-| 适配器模式 | 结构型 | Provider 适配 | `ai/src/providers/` |
-| 装饰器模式 | 结构型 | 缓存/重试 | `ai/src/cache.ts` |
-| 代理模式 | 结构型 | 权限检查/延迟加载 | `coding-agent/src/core/tools/` |
-| 桥接模式 | 结构型 | 主题渲染 | `tui/src/theme/` |
-| 组合模式 | 结构型 | UI 组件树/会话树 | `tui/src/components/` |
-| 策略模式 | 行为型 | 压缩策略 | `coding-agent/src/core/compaction/` |
-| 观察者模式 | 行为型 | 事件系统 | `agent/src/events.ts` |
-| 命令模式 | 行为型 | 撤销/重做 | `coding-agent/src/core/commands.ts` |
-| 状态模式 | 行为型 | Agent 状态 | `agent/src/agent-states.ts` |
-| 异步生成器 | 异步模式 | 流式聊天 | `ai/src/stream.ts` |
-| Reactor 模式 | 响应式 | TUI 事件循环 | `tui/src/tui.ts` |
-
----
-
-## 相关链接
-
-- **设计哲学**：`/LEARN/05-patterns/01-design-philosophy.md`
-- **类型系统设计**：`/LEARN/05-patterns/03-type-system.md`
-- **架构概览**：`/LEARN/02-architecture/01-architecture-overview.md`
+## 延伸阅读
+
+- [TypeScript 类型体系](./03-type-system.md)
+- [扩展系统](../04-subsystems/02-extension-system.md)
+- [工具系统](../04-subsystems/01-tool-system.md)
+- [事件系统](../02-architecture/04-event-system.md)

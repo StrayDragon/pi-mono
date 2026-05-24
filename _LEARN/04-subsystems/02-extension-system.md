@@ -1,1497 +1,491 @@
-# 扩展系统深度分析
+# 扩展系统
 
-> 理解 pi-mono 的扩展框架与插件机制
+Pi 的扩展系统位于 `packages/coding-agent/src/core/extensions/`，允许 TypeScript 模块在运行时注入工具、命令、快捷键、Provider、UI 组件，并订阅 Agent 全生命周期事件。
 
----
-
-## 1. 扩展系统概览
-
-pi-mono 的扩展系统是一个**功能强大且类型安全**的插件框架，允许开发者通过 TypeScript 模块扩展 Agent 的功能。
-
-### 1.1 核心能力
-
-扩展可以：
-- **订阅生命周期事件** - 响应 Agent 启动、消息流、工具执行等
-- **注册自定义工具** - 添加 LLM 可调用的新功能
-- **注册斜杠命令** - 添加用户可调用的命令
-- **注册快捷键** - 绑定键盘快捷键
-- **注册 CLI 标志** - 添加命令行参数
-- **自定义 UI 组件** - 替换页脚、页眉、编辑器等
-- **修改事件数据** - 拦截/修改工具调用、输入、上下文等
-- **扩展间通信** - 通过 EventBus 实现跨扩展通信
-
-### 1.2 文件位置
-
-| 组件 | 文件路径 |
-|------|---------|
-| **类型定义** | `/packages/coding-agent/src/core/extensions/types.ts` (1546 行) |
-| **运行时** | `/packages/coding-agent/src/core/extensions/runner.ts` (1022 行) |
-| **加载器** | `/packages/coding-agent/src/core/extensions/loader.ts` (607 行) |
-| **包装器** | `/packages/coding-agent/src/core/extensions/wrapper.ts` |
-| **示例扩展** | `/packages/coding-agent/examples/extensions/*.ts` |
-
----
-
-## 2. 扩展发现与加载
-
-### 2.1 发现路径
-
-扩展从以下位置按优先级加载：
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Extension Discovery                         │
-├─────────────────────────────────────────────────────────────────┤
-│ 1. 项目本地: <cwd>/.pi/extensions/                               │
-│ 2. 全局目录: ~/.pi/extensions/                                   │
-│ 3. 配置路径: --extensions <path>                                 │
-│ 4. 内置示例: packages/coding-agent/examples/extensions/         │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 2.2 发现规则
-
-**入口点：** `loader.ts:523-555`
-
-```typescript
-function discoverExtensionsInDir(dir: string): string[] {
-    const discovered: string[] = [];
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-    for (const entry of entries) {
-        const entryPath = path.join(dir, entry.name);
-
-        // 1. 直接文件: *.ts 或 *.js
-        if (entry.isFile() && isExtensionFile(entry.name)) {
-            discovered.push(entryPath);
-            continue;
-        }
-
-        // 2. 子目录: 检查 package.json 的 "pi" 字段或 index.ts/js
-        if (entry.isDirectory()) {
-            const entries = resolveExtensionEntries(entryPath);
-            if (entries) {
-                discovered.push(...entries);
-            }
-        }
-    }
-
-    return discovered;
-}
-```
-
-**package.json 清单支持：**
-
-```json
-{
-    "name": "my-extension-package",
-    "pi": {
-        "extensions": [
-            "./dist/tool1.ts",
-            "./dist/tool2.ts"
-        ],
-        "themes": ["./themes/dark.ts"],
-        "skills": ["./skills/code-review.ts"],
-        "prompts": ["./prompts/architect.md"]
-    }
-}
-```
-
-### 2.3 加载流程
-
-[MermaidChart:./_LEARN/docs/mmd/extension-system-lifecycle.mmd]
-
-**关键代码：** `loader.ts:378-401`
-
-```typescript
-async function loadExtension(
-    extensionPath: string,
-    cwd: string,
-    eventBus: EventBus,
-    runtime: ExtensionRuntime,
-): Promise<{ extension: Extension | null; error: string | null }> {
-    const resolvedPath = resolvePath(extensionPath, cwd);
-
-    try {
-        // 1. 使用 jiti 加载模块（支持 TypeScript）
-        const jiti = createJiti(import.meta.url, {
-            moduleCache: false,
-            ...(isBunBinary
-                ? { virtualModules: VIRTUAL_MODULES, tryNative: false }
-                : { alias: getAliases() }),
-        });
-
-        const module = await jiti.import(resolvedPath, { default: true });
-        const factory = module as ExtensionFactory;
-
-        if (typeof factory !== "function") {
-            return { extension: null, error: "Invalid factory function" };
-        }
-
-        // 2. 创建扩展对象
-        const extension = createExtension(extensionPath, resolvedPath);
-
-        // 3. 创建 API
-        const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-
-        // 4. 调用工厂函数
-        await factory(api);
-
-        return { extension, error: null };
-    } catch (err) {
-        return { extension, null, error: err.message };
-    }
-}
-```
-
----
-
-## 3. Extension API
-
-### 3.1 API 结构
-
-**定义位置：** `types.ts:1069-1295`
-
-```typescript
-interface ExtensionAPI {
-    // ========== 事件订阅 ==========
-    on(event: string, handler: ExtensionHandler): void;
-
-    // ========== 工具注册 ==========
-    registerTool<TParams extends TSchema = TSchema>(
-        tool: ToolDefinition<TParams>
-    ): void;
-
-    // ========== 命令、快捷键、标志注册 ==========
-    registerCommand(name: string, options: Omit<RegisteredCommand, "name">): void;
-    registerShortcut(shortcut: KeyId, options: {...}): void;
-    registerFlag(name: string, options: {...}): void;
-    getFlag(name: string): boolean | string | undefined;
-
-    // ========== 消息渲染 ==========
-    registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void;
-
-    // ========== 消息发送 ==========
-    sendMessage<T>(message: {...}, options?: {...}): void;
-    sendUserMessage(content: string | TextContent[], options?: {...}): void;
-    appendEntry<T>(customType: string, data?: T): void;
-
-    // ========== 会话元数据 ==========
-    setSessionName(name: string): void;
-    getSessionName(): string | undefined;
-    setLabel(entryId: string, label: string | undefined): void;
-
-    // ========== 工具管理 ==========
-    getActiveTools(): string[];
-    getAllTools(): ToolInfo[];
-    setActiveTools(toolNames: string[]): void;
-
-    // ========== 模型和思考级别 ==========
-    setModel(model: Model<any>): Promise<boolean>;
-    getThinkingLevel(): ThinkingLevel;
-    setThinkingLevel(level: ThinkingLevel): void;
-
-    // ========== Provider 注册 ==========
-    registerProvider(name: string, config: ProviderConfig): void;
-    unregisterProvider(name: string): void;
-
-    // ========== 扩展间通信 ==========
-    events: EventBus;
-}
-```
-
-### 3.2 事件订阅
-
-**事件类型定义：** `types.ts:941-962`
-
-```typescript
-type ExtensionEvent =
-    // 资源发现
-    | ResourcesDiscoverEvent
-    // 会话事件
-    | SessionStartEvent
-    | SessionBeforeSwitchEvent
-    | SessionBeforeForkEvent
-    | SessionBeforeCompactEvent
-    | SessionCompactEvent
-    | SessionShutdownEvent
-    | SessionBeforeTreeEvent
-    | SessionTreeEvent
-    // Agent 事件
-    | ContextEvent
-    | BeforeAgentStartEvent
-    | AgentStartEvent
-    | AgentEndEvent
-    | TurnStartEvent
-    | TurnEndEvent
-    | MessageStartEvent
-    | MessageUpdateEvent
-    | MessageEndEvent
-    | ToolExecutionStartEvent
-    | ToolExecutionUpdateEvent
-    | ToolExecutionEndEvent
-    // 模型事件
-    | ModelSelectEvent
-    // 用户事件
-    | UserBashEvent
-    | InputEvent
-    // 工具事件
-    | ToolCallEvent
-    | ToolResultEvent;
-```
-
-**订阅示例：**
-
-```typescript
-export default function (pi: ExtensionAPI) {
-    // 订阅单个事件
-    pi.on("session_start", async (event, ctx) => {
-        console.log("Session started:", event.reason);
-    });
-
-    // 订阅工具调用
-    pi.on("tool_call", async (event, ctx) => {
-        console.log("Tool called:", event.toolName);
-        // 可以修改 event.input
-    });
-
-    // 订阅工具结果
-    pi.on("tool_result", async (event, ctx) => {
-        // 可以修改 event.content 和 event.details
-        return {
-            content: [{ type: "text", text: "Modified result" }],
-            details: { custom: "data" }
-        };
-    });
-}
-```
-
-### 3.3 工具注册
-
-**ToolDefinition 接口：** `types.ts:424-471`
-
-```typescript
-interface ToolDefinition<
-    TParams extends TSchema = TSchema,
-    TDetails = unknown,
-    TState = any
-> {
-    /** 工具名称（LLM 调用时使用） */
-    name: string;
-
-    /** 人类可读标签 */
-    label: string;
-
-    /** LLM 描述 */
-    description: string;
-
-    /** 系统提示中的一行摘要 */
-    promptSnippet?: string;
-
-    /** 系统提示中的指南列表 */
-    promptGuidelines?: string[];
-
-    /** 参数模式（TypeBox） */
-    parameters: TParams;
-
-    /** 渲染控制 */
-    renderShell?: "default" | "self";
-
-    /** 参数准备钩子 */
-    prepareArguments?: (args: unknown) => Static<TParams>;
-
-    /** 执行模式覆盖 */
-    executionMode?: ToolExecutionMode;
-
-    /** 执行函数 */
-    execute(
-        toolCallId: string,
-        params: Static<TParams>,
-        signal: AbortSignal | undefined,
-        onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
-        ctx: ExtensionContext,
-    ): Promise<AgentToolResult<TDetails>>;
-
-    /** 自定义调用渲染 */
-    renderCall?: (
-        args: Static<TParams>,
-        theme: Theme,
-        context: ToolRenderContext<TState, Static<TParams>>
-    ) => Component;
-
-    /** 自定义结果渲染 */
-    renderResult?: (
-        result: AgentToolResult<TDetails>,
-        options: ToolRenderResultOptions,
-        theme: Theme,
-        context: ToolRenderContext<TState, Static<TParams>>
-    ) => Component;
-}
-```
-
-**示例：** `hello.ts`
-
-```typescript
-import { Type } from "@mariozechner/pi-ai";
-import { defineTool, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
-
-const helloTool = defineTool({
-    name: "hello",
-    label: "Hello",
-    description: "A simple greeting tool",
-    promptSnippet: "Greet users by name",
-    promptGuidelines: [
-        "Use the hello tool when users ask for greetings",
-        "Always include the user's name in the response"
-    ],
-    parameters: Type.Object({
-        name: Type.String({ description: "Name to greet" }),
-    }),
-
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-        // 流式更新支持
-        onUpdate?.({ type: "text", text: `Hello, ${params.name}!` });
-
-        return {
-            content: [{ type: "text", text: `Hello, ${params.name}!` }],
-            details: { greeted: params.name },
-        };
-    },
-});
-
-export default function (pi: ExtensionAPI) {
-    pi.registerTool(helloTool);
-}
-```
-
-### 3.4 命令注册
-
-**RegisteredCommand 接口：** `types.ts:1046-1056`
-
-```typescript
-interface RegisteredCommand {
-    name: string;
-    sourceInfo: SourceInfo;
-    description?: string;
-    getArgumentCompletions?: (argumentPrefix: string) =>
-        AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
-    handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
-}
-```
-
-**示例：** `commands.ts`
-
-```typescript
-export default function commandsExtension(pi: ExtensionAPI) {
-    pi.registerCommand("commands", {
-        description: "List available slash commands",
-        getArgumentCompletions: (prefix) => {
-            const sources = ["extension", "prompt", "skill"];
-            const filtered = sources.filter((s) => s.startsWith(prefix));
-            return filtered.length > 0
-                ? filtered.map((s) => ({ value: s, label: s }))
-                : null;
-        },
-        handler: async (args, ctx) => {
-            const commands = pi.getCommands();
-            const filtered = args.trim()
-                ? commands.filter((c) => c.source === args.trim())
-                : commands;
-
-            const items = filtered.map((c) => {
-                const desc = c.description ? ` - ${c.description}` : "";
-                return `/${c.name}${desc}`;
-            });
-
-            const selected = await ctx.ui.select("Available Commands", items);
-            if (selected) {
-                ctx.ui.notify(selected, "info");
-            }
-        },
-    });
-}
-```
-
-### 3.5 快捷键注册
-
-**示例：**
-
-```typescript
-export default function (pi: ExtensionAPI) {
-    pi.registerShortcut("ctrl+shift+p", {
-        description: "Open command palette",
-        handler: async (ctx) => {
-            ctx.ui.notify("Command palette opened!", "info");
-        },
-    });
-}
-```
-
-**保留快捷键（不能被覆盖）：**
-
-```typescript
-const RESERVED_KEYBINDINGS = [
-    "app.interrupt",
-    "app.clear",
-    "app.exit",
-    "app.suspend",
-    "app.thinking.cycle",
-    "app.model.cycleForward",
-    "app.model.cycleBackward",
-    "app.model.select",
-    "app.tools.expand",
-    "app.thinking.toggle",
-    "app.editor.external",
-    "app.message.followUp",
-    "tui.input.submit",
-    "tui.select.confirm",
-    "tui.select.cancel",
-    "tui.input.copy",
-    "tui.editor.deleteToLineEnd",
-];
-```
-
-### 3.6 CLI 标志注册
-
-**示例：**
-
-```typescript
-export default function (pi: ExtensionAPI) {
-    pi.registerFlag("verbose", {
-        description: "Enable verbose logging",
-        type: "boolean",
-        default: false,
-    });
-
-    pi.registerFlag("output-dir", {
-        description: "Output directory",
-        type: "string",
-        default: "./output",
-    });
-
-    // 使用标志
-    pi.on("session_start", (event, ctx) => {
-        const verbose = pi.getFlag("verbose");
-        const outputDir = pi.getFlag("output-dir");
-        console.log("Verbose:", verbose, "Output:", outputDir);
-    });
-}
-```
-
-### 3.7 Provider 注册
-
-**ProviderConfig 接口：** `types.ts:1301-1330`
-
-```typescript
-interface ProviderConfig {
-    /** API 基础 URL */
-    baseUrl?: string;
-
-    /** API 密钥或环境变量名 */
-    apiKey?: string;
-
-    /** API 类型 */
-    api?: Api;
-
-    /** 自定义流式处理 */
-    streamSimple?: (model, context, options) => AssistantMessageEventStream;
-
-    /** 自定义请求头 */
-    headers?: Record<string, string>;
-
-    /** 是否添加 Authorization 头 */
-    authHeader?: boolean;
-
-    /** 模型列表 */
-    models?: ProviderModelConfig[];
-
-    /** OAuth 支持 */
-    oauth?: {
-        name: string;
-        login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials>;
-        refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
-        getApiKey(credentials: OAuthCredentials): string;
-        modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
-    };
-}
-```
-
-**示例：注册自定义 Provider**
-
-```typescript
-export default function (pi: ExtensionAPI) {
-    // 注册新的 Provider
-    pi.registerProvider("my-proxy", {
-        baseUrl: "https://proxy.example.com",
-        apiKey: "PROXY_API_KEY",
-        api: "anthropic-messages",
-        models: [
-            {
-                id: "claude-sonnet-4-20250514",
-                name: "Claude 4 Sonnet (proxy)",
-                reasoning: false,
-                input: ["text", "image"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                contextWindow: 200000,
-                maxTokens: 16384
-            }
-        ]
-    });
-
-    // 覆盖现有 Provider 的 baseUrl
-    pi.registerProvider("anthropic", {
-        baseUrl: "https://proxy.example.com"
-    });
-
-    // 注册 OAuth Provider
-    pi.registerProvider("corporate-ai", {
-        baseUrl: "https://ai.corp.com",
-        api: "openai-responses",
-        models: [...],
-        oauth: {
-            name: "Corporate AI (SSO)",
-            async login(callbacks) {
-                // 实现 OAuth 登录流程
-                return {
-                    access: "access-token",
-                    refresh: "refresh-token",
-                    expiresAt: Date.now() + 3600000
-                };
-            },
-            async refreshToken(credentials) {
-                // 刷新令牌
-                return credentials;
-            },
-            getApiKey(credentials) {
-                return credentials.access;
-            }
-        }
-    });
-}
-```
-
----
-
-## 4. Extension Context
-
-### 4.1 ExtensionContext
-
-**定义位置：** `types.ts:296-325`
-
-```typescript
-interface ExtensionContext {
-    /** UI 交互方法 */
-    ui: ExtensionUIContext;
-
-    /** UI 是否可用（print/RPC 模式为 false） */
-    hasUI: boolean;
-
-    /** 当前工作目录 */
-    cwd: string;
-
-    /** 会话管理器（只读） */
-    sessionManager: ReadonlySessionManager;
-
-    /** 模型注册表 */
-    modelRegistry: ModelRegistry;
-
-    /** 当前模型 */
-    model: Model<any> | undefined;
-
-    /** Agent 是否空闲 */
-    isIdle(): boolean;
-
-    /** 当前 AbortSignal */
-    signal: AbortSignal | undefined;
-
-    /** 中止当前操作 */
-    abort(): void;
-
-    /** 是否有等待的消息 */
-    hasPendingMessages(): boolean;
-
-    /** 优雅关闭并退出 */
-    shutdown(): void;
-
-    /** 获取上下文使用情况 */
-    getContextUsage(): ContextUsage | undefined;
-
-    /** 触发压缩 */
-    compact(options?: CompactOptions): void;
-
-    /** 获取系统提示 */
-    getSystemPrompt(): string;
-}
-```
-
-### 4.2 ExtensionCommandContext
-
-**扩展上下文，包含会话控制方法：** `types.ts:331-362`
-
-```typescript
-interface ExtensionCommandContext extends ExtensionContext {
-    /** 等待 Agent 空闲 */
-    waitForIdle(): Promise<void>;
-
-    /** 启动新会话 */
-    newSession(options?: {
-        parentSession?: string;
-        setup?: (sessionManager: SessionManager) => Promise<void>;
-        withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-    }): Promise<{ cancelled: boolean }>;
-
-    /** 从指定条目分支 */
-    fork(
-        entryId: string,
-        options?: {
-            position?: "before" | "at";
-            withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-        }
-    ): Promise<{ cancelled: boolean }>;
-
-    /** 导航到会话树的不同点 */
-    navigateTree(
-        targetId: string,
-        options?: {
-            summarize?: boolean;
-            customInstructions?: string;
-            replaceInstructions?: boolean;
-            label?: string;
-        }
-    ): Promise<{ cancelled: boolean }>;
-
-    /** 切换到不同会话文件 */
-    switchSession(
-        sessionPath: string,
-        options?: {
-            withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-        }
-    ): Promise<{ cancelled: boolean }>;
-
-    /** 重新加载扩展 */
-    reload(): Promise<void>;
-}
-```
-
-### 4.3 ExtensionUIContext
-
-**UI 交互接口：** `types.ts:119-273`
-
-```typescript
-interface ExtensionUIContext {
-    /** 显示选择器 */
-    select(title: string, options: string[], opts?: {
-        signal?: AbortSignal;
-        timeout?: number;
-    }): Promise<string | undefined>;
-
-    /** 显示确认对话框 */
-    confirm(title: string, message: string, opts?: {
-        signal?: AbortSignal;
-        timeout?: number;
-    }): Promise<boolean>;
-
-    /** 显示输入对话框 */
-    input(title: string, placeholder?: string, opts?: {
-        signal?: AbortSignal;
-        timeout?: number;
-    }): Promise<string | undefined>;
-
-    /** 显示通知 */
-    notify(message: string, type?: "info" | "warning" | "error"): void;
-
-    /** 监听原始终端输入 */
-    onTerminalInput(handler: TerminalInputHandler): () => void;
-
-    /** 设置状态栏文本 */
-    setStatus(key: string, text: string | undefined): void;
-
-    /** 设置工作指示器消息 */
-    setWorkingMessage(message?: string): void;
-
-    /** 设置工作指示器可见性 */
-    setWorkingVisible(visible: boolean): void;
-
-    /** 配置工作指示器 */
-    setWorkingIndicator(options?: WorkingIndicatorOptions): void;
-
-    /** 设置隐藏思考块的标签 */
-    setHiddenThinkingLabel(label?: string): void;
-
-    /** 设置小组件 */
-    setWidget(key: string, content: string[] | Component | undefined, options?: {
-        placement?: "aboveEditor" | "belowEditor";
-    }): void;
-
-    /** 设置自定义页脚 */
-    setFooter(factory: ((tui: TUI, theme: Theme, footerData: ReadonlyFooterDataProvider) => Component) | undefined): void;
-
-    /** 设置自定义页眉 */
-    setHeader(factory: ((tui: TUI, theme: Theme) => Component) | undefined): void;
-
-    /** 设置终端标题 */
-    setTitle(title: string): void;
-
-    /** 显示自定义组件 */
-    custom<T>(
-        factory: (tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (result: T) => void) => Component | Promise<Component>,
-        options?: {
-            overlay?: boolean;
-            overlayOptions?: OverlayOptions | (() => OverlayOptions);
-            onHandle?: (handle: OverlayHandle) => void;
-        }
-    ): Promise<T>;
-
-    /** 粘贴到编辑器 */
-    pasteToEditor(text: string): void;
-
-    /** 设置编辑器文本 */
-    setEditorText(text: string): void;
-
-    /** 获取编辑器文本 */
-    getEditorText(): string;
-
-    /** 显示多行编辑器 */
-    editor(title: string, prefill?: string): Promise<string | undefined>;
-
-    /** 添加自动完成提供程序 */
-    addAutocompleteProvider(factory: AutocompleteProviderFactory): void;
-
-    /** 设置自定义编辑器组件 */
-    setEditorComponent(factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent) | undefined): void;
-
-    /** 获取当前主题 */
-    readonly theme: Theme;
-
-    /** 获取所有主题 */
-    getAllThemes(): { name: string; path: string | undefined }[];
-
-    /** 加载主题 */
-    getTheme(name: string): Theme | undefined;
-
-    /** 设置主题 */
-    setTheme(theme: string | Theme): { success: boolean; error?: string };
-
-    /** 获取工具展开状态 */
-    getToolsExpanded(): boolean;
-
-    /** 设置工具展开状态 */
-    setToolsExpanded(expanded: boolean): void;
-}
-```
-
----
-
-## 5. ExtensionRunner
-
-### 5.1 类结构
-
-**定义位置：** `runner.ts:220-1022`
-
-```typescript
-class ExtensionRunner {
-    private extensions: Extension[];
-    private runtime: ExtensionRuntime;
-    private uiContext: ExtensionUIContext;
-    private cwd: string;
-    private sessionManager: SessionManager;
-    private modelRegistry: ModelRegistry;
-
-    constructor(
-        extensions: Extension[],
-        runtime: ExtensionRuntime,
-        cwd: string,
-        sessionManager: SessionManager,
-        modelRegistry: ModelRegistry,
-    );
-
-    /** 绑定核心操作 */
-    bindCore(
-        actions: ExtensionActions,
-        contextActions: ExtensionContextActions,
-        providerActions?: {...}
-    ): void;
-
-    /** 绑定命令上下文 */
-    bindCommandContext(actions?: ExtensionCommandContextActions): void;
-
-    /** 设置 UI 上下文 */
-    setUIContext(uiContext?: ExtensionUIContext): void;
-
-    /** 创建扩展上下文 */
-    createContext(): ExtensionContext;
-
-    /** 创建命令上下文 */
-    createCommandContext(): ExtensionCommandContext;
-
-    /** 发射通用事件 */
-    async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>>;
-
-    /** 发射工具调用事件 */
-    async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined>;
-
-    /** 发射工具结果事件 */
-    async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined>;
-
-    /** 发射上下文事件 */
-    async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]>;
-
-    /** 发射输入事件 */
-    async emitInput(text: string, images: ImageContent[] | undefined, source: InputSource): Promise<InputEventResult>;
-}
-```
-
-### 5.2 核心绑定流程
-
-**代码：** `runner.ts:262-332`
-
-```typescript
-bindCore(
-    actions: ExtensionActions,
-    contextActions: ExtensionContextActions,
-    providerActions?: {
-        registerProvider?: (name: string, config: ProviderConfig) => void;
-        unregisterProvider?: (name: string) => void;
-    },
-): void {
-    // 1. 将操作复制到共享运行时
-    this.runtime.sendMessage = actions.sendMessage;
-    this.runtime.sendUserMessage = actions.sendUserMessage;
-    this.runtime.appendEntry = actions.appendEntry;
-    this.runtime.setSessionName = actions.setSessionName;
-    this.runtime.getSessionName = actions.getSessionName;
-    this.runtime.setLabel = actions.setLabel;
-    this.runtime.getActiveTools = actions.getActiveTools;
-    this.runtime.getAllTools = actions.getAllTools;
-    this.runtime.setActiveTools = actions.setActiveTools;
-    this.runtime.refreshTools = actions.refreshTools;
-    this.runtime.getCommands = actions.getCommands;
-    this.runtime.setModel = actions.setModel;
-    this.runtime.getThinkingLevel = actions.getThinkingLevel;
-    this.runtime.setThinkingLevel = actions.setThinkingLevel;
-
-    // 2. 设置上下文操作
-    this.getModel = contextActions.getModel;
-    this.isIdleFn = contextActions.isIdle;
-    this.getSignalFn = contextActions.getSignal;
-    this.abortFn = contextActions.abort;
-    this.hasPendingMessagesFn = contextActions.hasPendingMessages;
-    this.shutdownHandler = contextActions.shutdown;
-    this.getContextUsageFn = contextActions.getContextUsage;
-    this.compactFn = contextActions.compact;
-    this.getSystemPromptFn = contextActions.getSystemPrompt;
-
-    // 3. 刷新扩展加载期间排队的 Provider 注册
-    for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
-        try {
-            if (providerActions?.registerProvider) {
-                providerActions.registerProvider(name, config);
-            } else {
-                this.modelRegistry.registerProvider(name, config);
-            }
-        } catch (err) {
-            this.emitError({
-                extensionPath,
-                event: "register_provider",
-                error: err instanceof Error ? err.message : String(err),
-                stack: err instanceof Error ? err.stack : undefined,
-            });
-        }
-    }
-    this.runtime.pendingProviderRegistrations = [];
-
-    // 4. 从此时起，Provider 注册/注销立即生效
-    this.runtime.registerProvider = (name, config) => {
-        if (providerActions?.registerProvider) {
-            providerActions.registerProvider(name, config);
-            return;
-        }
-        this.modelRegistry.registerProvider(name, config);
-    };
-    this.runtime.unregisterProvider = (name) => {
-        if (providerActions?.unregisterProvider) {
-            providerActions.unregisterProvider(name);
-            return;
-        }
-        this.modelRegistry.unregisterProvider(name);
-    };
-}
-```
-
-### 5.3 事件发射流程
-
-**通用事件发射：** `runner.ts:676-708`
-
-```typescript
-async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
-    const ctx = this.createContext();
-    let result: SessionBeforeEventResult | undefined;
-
-    for (const ext of this.extensions) {
-        const handlers = ext.handlers.get(event.type);
-        if (!handlers || handlers.length === 0) continue;
-
-        for (const handler of handlers) {
-            try {
-                const handlerResult = await handler(event, ctx);
-
-                // 处理可取消事件
-                if (this.isSessionBeforeEvent(event) && handlerResult) {
-                    result = handlerResult as SessionBeforeEventResult;
-                    if (result.cancel) {
-                        return result as RunnerEmitResult<TEvent>;
-                    }
-                }
-            } catch (err) {
-                const message = err instanceof Error ? err.message : String(err);
-                const stack = err instanceof Error ? err.stack : undefined;
-                this.emitError({
-                    extensionPath: ext.path,
-                    event: event.type,
-                    error: message,
-                    stack,
-                });
-            }
-        }
-    }
-
-    return result as RunnerEmitResult<TEvent>;
-}
-```
-
-**工具调用事件：** `runner.ts:760-781`
-
-```typescript
-async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
-    const ctx = this.createContext();
-    let result: ToolCallEventResult | undefined;
-
-    for (const ext of this.extensions) {
-        const handlers = ext.handlers.get("tool_call");
-        if (!handlers || handlers.length === 0) continue;
-
-        for (const handler of handlers) {
-            const handlerResult = await handler(event, ctx);
-
-            if (handlerResult) {
-                result = handlerResult as ToolCallEventResult;
-                if (result.block) {
-                    return result;  // 阻止工具执行
-                }
-            }
-        }
-    }
-
-    return result;
-}
-```
-
-**工具结果事件：** `runner.ts:710-758`
-
-```typescript
-async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
-    const ctx = this.createContext();
-    const currentEvent: ToolResultEvent = { ...event };
-    let modified = false;
-
-    for (const ext of this.extensions) {
-        const handlers = ext.handlers.get("tool_result");
-        if (!handlers || handlers.length === 0) continue;
-
-        for (const handler of handlers) {
-            try {
-                const handlerResult = (await handler(currentEvent, ctx)) as ToolResultEventResult | undefined;
-                if (!handlerResult) continue;
-
-                // 允许修改结果
-                if (handlerResult.content !== undefined) {
-                    currentEvent.content = handlerResult.content;
-                    modified = true;
-                }
-                if (handlerResult.details !== undefined) {
-                    currentEvent.details = handlerResult.details;
-                    modified = true;
-                }
-                if (handlerResult.isError !== undefined) {
-                    currentEvent.isError = handlerResult.isError;
-                    modified = true;
-                }
-            } catch (err) {
-                // 错误处理...
-            }
-        }
-    }
-
-    if (!modified) {
-        return undefined;
-    }
-
-    return {
-        content: currentEvent.content,
-        details: currentEvent.details,
-        isError: currentEvent.isError,
-    };
-}
-```
-
----
-
-## 6. 扩展生命周期
-
-### 6.1 加载阶段
+## 架构概览
 
 ```mermaid
-sequenceDiagram
-    participant CLI as CLI
-    participant Loader as ExtensionLoader
-    participant Runtime as ExtensionRuntime
-    participant Factory as ExtensionFactory
-    participant Runner as ExtensionRunner
-
-    CLI->>Loader: discoverAndLoadExtensions()
-    Loader->>Loader: 扫描目录
-    Loader->>Runtime: createExtensionRuntime()
-    Runtime-->>Loader: throwing stubs
-
-    loop 每个扩展
-        Loader->>Factory: jiti.import(path)
-        Factory-->>Loader: factory function
-        Loader->>Factory: call factory(api)
-        Factory->>Runtime: registerTool/on/registerCommand
-        Factory-->>Loader: initialized
+graph TB
+    subgraph "发现与加载"
+        DISC["路径发现<br/>project/global/settings/CLI"]
+        JITI["jiti 加载<br/>TypeScript 直执行"]
+        FACTORY["ExtensionFactory(pi)"]
     end
 
-    Loader-->>CLI: LoadExtensionsResult
-    CLI->>Runner: new ExtensionRunner()
-    Runner-->>CLI: ready for binding
-```
-
-### 6.2 绑定阶段
-
-```mermaid
-sequenceDiagram
-    participant Mode as InteractiveMode
-    participant Runner as ExtensionRunner
-    participant Runtime as ExtensionRuntime
-    participant Registry as ModelRegistry
-
-    Mode->>Runner: bindCore(actions, contextActions)
-    Runner->>Runtime: 复制 actions 到 runtime
-    Runner->>Runtime: 复制 contextActions
-    Runner->>Runtime: 刷新 pendingProviderRegistrations
-    Runtime->>Registry: registerProvider(name, config)
-
-    Mode->>Runner: bindCommandContext(commandActions)
-    Runner->>Runner: 设置命令处理程序
-
-    Mode->>Runner: setUIContext(uiContext)
-    Runner->>Runner: 启用 UI 交互
-
-    Mode-->>Runner: 绑定完成，可以发射事件
-```
-
-### 6.3 运行阶段
-
-```mermaid
-sequenceDiagram
-    participant Core as AgentSession
-    participant Runner as ExtensionRunner
-    participant Ext1 as Extension 1
-    participant Ext2 as Extension 2
-    participant UI as ExtensionUIContext
-
-    Core->>Runner: emit("tool_call", event)
-    Runner->>Runner: createContext()
-    Runner->>Ext1: handler(event, ctx)
-    Ext1->>UI: ui.notify()
-    Ext1-->>Runner: result
-
-    Runner->>Ext2: handler(event, ctx)
-    Ext2-->>Runner: block: true
-
-    Runner-->>Core: { block: true }
-
-    alt block: true
-        Core->>Core: 跳过工具执行
-    else 正常
-        Core->>Core: 执行工具
+    subgraph "注册"
+        API["ExtensionAPI"]
+        EXT["Extension 对象<br/>handlers/tools/commands/..."]
     end
+
+    subgraph "运行时"
+        RUNNER["ExtensionRunner"]
+        CTX["ExtensionContext"]
+        UI["ExtensionUIContext"]
+    end
+
+    DISC --> JITI --> FACTORY --> API --> EXT
+    EXT --> RUNNER
+    RUNNER --> CTX
+    RUNNER --> UI
 ```
 
----
+## 扩展发现路径
 
-## 7. 高级功能
+扩展从多个来源合并加载，**先加载者优先**（冲突时后加载覆盖）：
 
-### 7.1 动态工具注册
+```mermaid
+flowchart LR
+    subgraph "自动发现"
+        P[".pi/extensions/<br/>项目本地"]
+        G["~/.pi/agent/extensions/<br/>全局"]
+    end
 
-**示例：** `dynamic-tools.ts`
+    subgraph "配置"
+        S["settings.json<br/>extensions 数组"]
+        PKG["package.json<br/>pi.extensions 字段"]
+    end
+
+    subgraph "CLI"
+        C["--extension / -e"]
+    end
+
+    P --> MERGE["mergePaths()"]
+    G --> MERGE
+    S --> MERGE
+    PKG --> MERGE
+    C --> MERGE
+    MERGE --> LOAD["loadExtensions()"]
+```
+
+目录发现规则（`loader.ts`）：
+
+1. **直接文件**：`extensions/*.ts` 或 `*.js`
+2. **子目录 index**：`extensions/my-ext/index.ts`
+3. **package.json 清单**：`extensions/my-ext/package.json` 中 `"pi": { "extensions": [...] }`
+
+不递归超过一层；复杂包须用 manifest 声明入口。
+
+`ResourceLoader` 还会解析 npm 包中的扩展路径，并与 settings 中启用的路径合并。`--no-extensions` 跳过 settings/自动发现，仅保留 CLI 指定的扩展。
+
+## jiti 加载
+
+扩展模块通过 **jiti** 直接执行 TypeScript，无需预编译：
+
+```mermaid
+flowchart TD
+    PATH["扩展 .ts 路径"] --> JITI["createJiti()"]
+    JITI --> MODE{"isBunBinary?"}
+    MODE -->|是| VM["virtualModules<br/>bundled packages"]
+    MODE -->|否| ALIAS["alias → node_modules/workspace"]
+    VM --> IMPORT["jiti.import(path)"]
+    ALIAS --> IMPORT
+    IMPORT --> FACTORY{"export default 是函数?"}
+    FACTORY -->|是| RUN["await factory(api)"]
+    FACTORY -->|否| ERR["加载错误"]
+```
+
+### Bun 二进制虚拟模块
+
+编译为 Bun 单文件二进制时，扩展无法访问文件系统上的 `node_modules`。loader 通过 **virtualModules** 注入预打包依赖：
+
+| 虚拟模块 | 实际包 |
+|----------|--------|
+| `typebox` / `@sinclair/typebox` | TypeBox |
+| `@earendil-works/pi-agent-core` | Agent 核心 |
+| `@earendil-works/pi-ai` | AI/模型层 |
+| `@earendil-works/pi-tui` | TUI 组件 |
+| `@earendil-works/pi-coding-agent` | 自身 SDK |
+
+Node.js 开发模式则用 **alias** 解析到 workspace 或 `node_modules` 路径。
+
+## ExtensionFactory
 
 ```typescript
-export default function dynamicToolsExtension(pi: ExtensionAPI) {
-    const registeredToolNames = new Set<string>();
-
-    const registerEchoTool = (name: string, label: string, prefix: string): boolean => {
-        if (registeredToolNames.has(name)) {
-            return false;
-        }
-
-        registeredToolNames.add(name);
-        pi.registerTool({
-            name,
-            label,
-            description: `Echo a message with prefix: ${prefix}`,
-            promptSnippet: `Echo back user-provided text with ${prefix.trim()} prefix`,
-            promptGuidelines: ["Use echo_session when the user asks for exact echo output."],
-            parameters: Type.Object({
-                message: Type.String({ description: "Message to echo" }),
-            }),
-            async execute(_toolCallId, params) {
-                return {
-                    content: [{ type: "text", text: `${prefix}${params.message}` }],
-                    details: { tool: name, prefix },
-                };
-            },
-        });
-
-        return true;
-    };
-
-    // 在 session_start 时注册工具
-    pi.on("session_start", (_event, ctx) => {
-        registerEchoTool("echo_session", "Echo Session", "[session] ");
-        ctx.ui.notify("Registered dynamic tool: echo_session", "info");
-    });
-
-    // 通过命令添加新工具
-    pi.registerCommand("add-echo-tool", {
-        description: "Register a new echo tool dynamically",
-        handler: async (args, ctx) => {
-            const toolName = normalizeToolName(args);
-            if (!toolName) {
-                ctx.ui.notify("Usage: /add-echo-tool <tool_name>", "warning");
-                return;
-            }
-
-            const created = registerEchoTool(toolName, `Echo ${toolName}`, `[${toolName}] `);
-            if (!created) {
-                ctx.ui.notify(`Tool already registered: ${toolName}`, "warning");
-                return;
-            }
-
-            ctx.ui.notify(`Registered dynamic tool: ${toolName}`, "info");
-        },
-    });
-}
+type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 ```
 
-### 7.2 输入转换链
-
-**示例：** `input-transform.ts`
-
-```typescript
-export default function (pi: ExtensionAPI) {
-    // 自动修正拼写错误
-    pi.on("input", async (event, ctx) => {
-        const { text, images, source } = event;
-
-        // 只处理交互式输入
-        if (source !== "interactive") {
-            return { action: "continue" };
-        }
-
-        // 应用转换
-        const corrected = applySpellCheck(text);
-        if (corrected !== text) {
-            return { action: "transform", text: corrected, images };
-        }
-
-        return { action: "continue" };
-    });
-}
-```
-
-**转换链行为：** `runner.ts:993-1021`
-
-```typescript
-async emitInput(text: string, images: ImageContent[] | undefined, source: InputSource): Promise<InputEventResult> {
-    const ctx = this.createContext();
-    let currentText = text;
-    let currentImages = images;
-
-    for (const ext of this.extensions) {
-        for (const handler of ext.handlers.get("input") ?? []) {
-            try {
-                const event: InputEvent = { type: "input", text: currentText, images: currentImages, source };
-                const result = (await handler(event, ctx)) as InputEventResult | undefined;
-
-                // handled: 完全处理，不继续
-                if (result?.action === "handled") return result;
-
-                // transform: 修改输入，传递给下一个处理器
-                if (result?.action === "transform") {
-                    currentText = result.text;
-                    currentImages = result.images ?? currentImages;
-                }
-            } catch (err) {
-                this.emitError({
-                    extensionPath: ext.path,
-                    event: "input",
-                    error: err instanceof Error ? err.message : String(err),
-                    stack: err instanceof Error ? err.stack : undefined,
-                });
-            }
-        }
-    }
-
-    // 检查是否被修改
-    return currentText !== text || currentImages !== images
-        ? { action: "transform", text: currentText, images: currentImages }
-        : { action: "continue" };
-}
-```
-
-### 7.3 自定义消息渲染器
-
-**示例：** `message-renderer.ts`
-
-```typescript
-import type { CustomMessage, ExtensionAPI, Component } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
-
-interface ProgressData {
-    current: number;
-    total: number;
-    message: string;
-}
-
-export default function (pi: ExtensionAPI) {
-    pi.registerMessageRenderer<ProgressData>("progress", (message, options, theme) => {
-        const data = message.details as ProgressData;
-        const percentage = Math.round((data.current / data.total) * 100);
-        const bar = "█".repeat(Math.floor(percentage / 5)) + "░".repeat(20 - Math.floor(percentage / 5));
-
-        return new Text(
-            `${theme.highlight(data.message)}\n` +
-            `${bar} ${percentage}% (${data.current}/${data.total})`
-        );
-    });
-
-    // 发送自定义消息
-    pi.on("session_start", (_event, ctx) => {
-        pi.sendMessage({
-            customType: "progress",
-            content: [{ type: "text", text: "Processing files..." }],
-            display: "inline",
-            details: { current: 5, total: 10, message: "Scanning" }
-        });
-    });
-}
-```
-
-### 7.4 EventBus 通信
-
-**示例：** `event-bus.ts`
+扩展文件 **default export** 一个工厂函数，接收 `ExtensionAPI`，在加载时同步或异步注册能力：
 
 ```typescript
 export default function (pi: ExtensionAPI) {
-    // 发送自定义事件
-    pi.on("tool_call", async (event) => {
-        if (event.toolName === "read") {
-            pi.events.emit("file:read", {
-                path: event.input.path,
-                timestamp: Date.now()
-            });
-        }
-    });
-
-    // 监听其他扩展的事件
-    pi.events.on("file:read", (data) => {
-        console.log("File read:", data.path);
-    });
-
-    // 跨扩展通信
-    pi.events.on("custom:event", (data) => {
-        // 处理自定义事件
-    });
+  pi.registerTool(myTool);
+  pi.on("session_start", async (event, ctx) => { ... });
+  pi.registerCommand("hello", { handler: async (args, ctx) => { ... } });
 }
 ```
 
----
+## ExtensionAPI 接口
 
-## 8. 扩展最佳实践
+`ExtensionAPI` 是扩展与 Pi 交互的唯一入口：
 
-### 8.1 命名规范
+```mermaid
+mindmap
+  root((ExtensionAPI))
+    事件
+      on(event, handler)
+      events EventBus
+    工具
+      registerTool
+      getActiveTools
+      setActiveTools
+    命令与输入
+      registerCommand
+      registerShortcut
+      registerFlag
+    消息
+      sendMessage
+      sendUserMessage
+      appendEntry
+      registerMessageRenderer
+    模型
+      setModel
+      getThinkingLevel
+      setThinkingLevel
+      registerProvider
+      unregisterProvider
+    会话元数据
+      setSessionName
+      setLabel
+      exec
+```
 
-- **工具名**：小写、下划线（`my_tool`）
-- **命令名**：小写、连字符（`my-command`）
-- **标志名**：小写、连字符（`--my-flag`）
-- **自定义类型**：命名空间格式（`my_extension:type`）
+## ExtensionContext 与 ExtensionUIContext
 
-### 8.2 错误处理
+### ExtensionContext
+
+事件处理器和工具 `execute` 接收的上下文：
+
+| 成员 | 说明 |
+|------|------|
+| `ui` | UI 交互方法（`ExtensionUIContext`） |
+| `hasUI` | 是否有 UI（print/RPC 模式为 false） |
+| `cwd` | 当前工作目录 |
+| `sessionManager` | 只读会话管理器 |
+| `modelRegistry` | 模型注册表（API key 解析） |
+| `model` | 当前模型 |
+| `isIdle()` / `signal` / `abort()` | Agent 状态控制 |
+| `getContextUsage()` | 上下文 token 用量 |
+| `compact()` | 触发压缩 |
+| `getSystemPrompt()` | 当前系统提示词 |
+
+### ExtensionCommandContext
+
+命令处理器额外获得会话控制能力：
+
+- `waitForIdle()` — 等待 Agent 停止流式输出
+- `newSession()` / `fork()` / `navigateTree()` / `switchSession()` — 会话操作
+- `reload()` — 热重载扩展/技能/主题
+
+### ExtensionUIContext
+
+交互模式下的 UI 原语：对话框（select/confirm/input）、通知、状态栏、working indicator、widget/footer/header 定制、编辑器替换、主题切换、工具输出展开控制等。
+
+```mermaid
+graph LR
+    subgraph "ExtensionContext"
+        CTX["cwd / model / sessionManager"]
+        ACT["abort / compact / getSystemPrompt"]
+    end
+
+    subgraph "ExtensionUIContext"
+        DIALOG["select / confirm / input"]
+        DISPLAY["notify / setStatus / setWidget"]
+        EDITOR["setEditorComponent / pasteToEditor"]
+    end
+
+    CTX --> UI["ctx.ui"]
+    UI --> DIALOG
+    UI --> DISPLAY
+    UI --> EDITOR
+```
+
+## 事件类型（按类别）
+
+共 **29 种** `ExtensionEvent` 类型，按职责分组：
+
+### 资源发现（1）
+
+| 事件 | 说明 |
+|------|------|
+| `resources_discover` | 启动/reload 后，扩展可返回额外 skill/prompt/theme 路径 |
+
+### 会话（8）
+
+| 事件 | 可取消 | 说明 |
+|------|--------|------|
+| `session_start` | | 会话启动/加载/新建/fork/resume |
+| `session_before_switch` | 是 | 切换会话前 |
+| `session_before_fork` | 是 | fork 前 |
+| `session_before_compact` | 是 | 压缩前（可自定义压缩结果） |
+| `session_compact` | | 压缩完成 |
+| `session_shutdown` | | 退出/reload/会话替换前 |
+| `session_before_tree` | 是 | 树导航前（可自定义摘要） |
+| `session_tree` | | 树导航完成 |
+
+### Agent 与上下文（11）
+
+| 事件 | 可修改 | 说明 |
+|------|--------|------|
+| `context` | messages | 每次 LLM 调用前 |
+| `before_provider_request` | payload | 发送请求前 |
+| `after_provider_response` | | 收到响应后 |
+| `before_agent_start` | systemPrompt, message | 用户提交后、Agent 循环前 |
+| `agent_start` / `agent_end` | | Agent 循环起止 |
+| `turn_start` / `turn_end` | | 单轮起止 |
+| `message_start/update/end` | message (end) | 消息流式生命周期 |
+| `tool_execution_start/update/end` | | 工具执行观察 |
+
+### 模型（2）
+
+| 事件 | 说明 |
+|------|------|
+| `model_select` | 模型切换 |
+| `thinking_level_select` | 思考级别切换 |
+
+### 工具（2）
+
+| 事件 | 可修改 | 说明 |
+|------|--------|------|
+| `tool_call` | input (就地), block | 工具执行前 |
+| `tool_result` | content, details, isError | 工具执行后 |
+
+### 用户输入（2）
+
+| 事件 | 可修改 | 说明 |
+|------|--------|------|
+| `input` | transform / handled | 用户输入到达后 |
+| `user_bash` | operations, result | `!` / `!!` 前缀 bash |
+
+```mermaid
+graph TB
+    subgraph "会话事件"
+        SS[session_start]
+        SBS[session_before_switch]
+        SBF[session_before_fork]
+        SBC[session_before_compact]
+        SC[session_compact]
+        SSH[session_shutdown]
+        SBT[session_before_tree]
+        ST[session_tree]
+    end
+
+    subgraph "Agent 事件"
+        CTX[context]
+        BAS[before_agent_start]
+        AS[agent_start]
+        AE[agent_end]
+        TS[turn_start]
+        TE[turn_end]
+        MS[message_start]
+        MU[message_update]
+        ME[message_end]
+    end
+
+    subgraph "工具事件"
+        TC[tool_call]
+        TR[tool_result]
+        TES[tool_execution_start]
+        TEU[tool_execution_update]
+        TEE[tool_execution_end]
+    end
+
+    SS --> BAS --> AS --> TS --> MS --> MU --> ME
+    ME --> TC --> TEE
+    TC --> TES --> TEU
+```
+
+## 事件分发与结果合并
+
+`ExtensionRunner` 按扩展加载顺序依次调用 handler，不同事件有不同的合并策略：
+
+```mermaid
+flowchart TD
+    EVENT["触发事件"] --> LOOP["遍历 extensions"]
+    LOOP --> HANDLER["调用 handler(event, ctx)"]
+    HANDLER --> MERGE{"事件类型"}
+
+    MERGE -->|context| M1["后者覆盖 messages"]
+    MERGE -->|before_provider_request| M2["后者覆盖 payload"]
+    MERGE -->|before_agent_start| M3["systemPrompt 链式替换<br/>messages 累积"]
+    MERGE -->|tool_call| M4["block 任一 true 则阻止<br/>input 就地累积修改"]
+    MERGE -->|tool_result| M5["后者覆盖 content/details"]
+    MERGE -->|session_before_*| M6["cancel 任一 true 则取消"]
+    MERGE -->|input| M7["handled 停止链<br/>transform 替换 text"]
+    MERGE -->|resources_discover| M8["路径数组合并"]
+```
+
+### 合并示例
+
+**context 事件** — 顺序替换：
 
 ```typescript
-export default function (pi: ExtensionAPI) {
-    pi.on("tool_call", async (event, ctx) => {
-        try {
-            await doSomething(event);
-        } catch (err) {
-            // 使用 ui.notify 而不是 console.error
-            ctx.ui.notify(
-                `Error: ${err instanceof Error ? err.message : String(err)}`,
-                "error"
-            );
-
-            // 不要重新抛出，避免影响其他扩展
-        }
-    });
-}
+// 扩展 A 返回 { messages: modifiedA }
+// 扩展 B 返回 { messages: modifiedB }
+// 最终 messages = modifiedB
 ```
 
-### 8.3 资源清理
+**before_agent_start** — systemPrompt 链式、message 累积：
 
 ```typescript
-export default function (pi: ExtensionAPI) {
-    let intervalId: NodeJS.Timeout | undefined;
-
-    pi.on("session_start", (_event, ctx) => {
-        // 设置定时器
-        intervalId = setInterval(() => {
-            // 定期任务
-        }, 1000);
-    });
-
-    pi.on("session_shutdown", (_event, _ctx) => {
-        // 清理资源
-        if (intervalId) {
-            clearInterval(intervalId);
-            intervalId = undefined;
-        }
-    });
-}
+// 扩展 A: { systemPrompt: "A" }
+// 扩展 B: { systemPrompt: "B" }  → 最终 "B"
+// 两者都返回 message → messages 数组包含两条
 ```
 
-### 8.4 上下文失效处理
+**tool_call** — 就地修改 args，后 handler 看到前者的 mutation：
 
 ```typescript
-export default function (pi: ExtensionAPI) {
-    pi.registerCommand("long-running", {
-        description: "Long running operation",
-        handler: async (_args, ctx) => {
-            // ❌ 错误：使用捕获的 ctx
-            // setTimeout(() => ctx.ui.notify("Done"), 5000);
-
-            // ✅ 正确：创建新会话
-            const doLater = async () => {
-                await new Promise(resolve => setTimeout(resolve, 5000));
-                // ctx 可能已失效
-                try {
-                    ctx.ui.notify("Done");
-                } catch {
-                    // 上下文已失效，忽略
-                }
-            };
-
-            await doLater();
-        },
-    });
-}
+// 扩展 A: event.input.path = "/fixed"
+// 扩展 B: 看到已修改的 input
+// 任一返回 { block: true } → 工具不执行
 ```
 
-### 8.5 避免事件循环
+Handler 错误被捕获并通过 `emitError()` 报告，不中断其他扩展。
 
-```typescript
-export default function (pi: ExtensionAPI) {
-    let handling = false;
+## 扩展提供的能力
 
-    pi.on("tool_result", async (event, ctx) => {
-        // 防止无限循环
-        if (handling) return;
-        handling = true;
+```mermaid
+graph LR
+    subgraph "Extension 对象"
+        T["tools: Map"]
+        C["commands: Map"]
+        S["shortcuts: Map"]
+        F["flags: Map"]
+        H["handlers: Map"]
+        R["messageRenderers: Map"]
+    end
 
-        try {
-            await ctx.sendMessage("Tool done!");
-        } finally {
-            handling = false;
-        }
-    });
-}
+    T --> LLM["LLM 可调用工具"]
+    C --> SLASH["/命令"]
+    S --> KEYS["键盘快捷键"]
+    F --> CLI["CLI 标志"]
+    H --> EVENTS["生命周期事件"]
+    R --> TUI["CustomMessage 渲染"]
+    F --> W["widgets / footer / header"]
 ```
 
----
+| 能力 | 注册 API | 运行时效果 |
+|------|----------|------------|
+| 工具 | `registerTool()` | LLM 工具列表 + TUI 渲染 |
+| 命令 | `registerCommand()` | `/命令名` 斜杠命令 |
+| 快捷键 | `registerShortcut()` | 键盘绑定（冲突检测） |
+| CLI 标志 | `registerFlag()` | `--flag-name` 参数 |
+| Widget | `ctx.ui.setWidget()` | 编辑器上下方面板 |
+| Footer/Header | `ctx.ui.setFooter/setHeader()` | 自定义页眉页脚 |
+| Provider | `registerProvider()` | 动态模型/端点/OAuth |
 
-## 9. 调试扩展
+同名命令冲突时，后加载扩展获得带序号后缀的 invocation name（如 `deploy:2`）。
 
-### 9.1 启用详细日志
+## 扩展生命周期
 
-```bash
-# 设置环境变量
-PI_DEBUG=1 pi
+```mermaid
+stateDiagram-v2
+    [*] --> Discover: 路径发现
+    Discover --> Load: jiti.import
+    Load --> Register: factory(api)
+    Register --> Bound: runner.bindCore()
+    Bound --> Active: 事件/工具可用
 
-# 或使用标志
-pi --verbose
+    Active --> Handling: 事件触发
+    Handling --> Active: handler 返回
+
+    Active --> Reload: ctx.reload()
+    Reload --> Shutdown: session_shutdown
+    Shutdown --> Invalidate: ctx 标记 stale
+    Invalidate --> Discover: 重新加载
+
+    Active --> Replace: newSession/fork/switchSession
+    Replace --> Shutdown
 ```
 
-### 9.2 检查扩展加载
+### Runtime 状态机
 
-```typescript
-export default function (pi: ExtensionAPI) {
-    pi.on("session_start", (event, ctx) => {
-        // 记录所有事件
-        console.log("[DEBUG] Extension loaded:", ctx.cwd);
-        console.log("[DEBUG] Session start reason:", event.reason);
-    });
-}
+```mermaid
+sequenceDiagram
+    participant L as loader
+    participant R as runtime
+    participant RN as runner
+
+    L->>R: createExtensionRuntime()<br/>action stubs
+    L->>R: factory 注册 tools/handlers
+    RN->>R: bindCore() 替换 stubs
+    RN->>R: flush pendingProviderRegistrations
+    Note over R: registerProvider 立即可用
+    RN->>R: invalidate() on reload/replace
 ```
 
-### 9.3 测试工具注册
+加载期间 `sendMessage` 等 action 方法抛出 "not initialized"；`registerTool` 和 `on` 在加载时即可用。`registerProvider` 在 bind 前排队，bind 后 flush 到 `ModelRegistry`。
 
-```bash
-# 列出所有工具
-pi --help
+## 事件流
 
-# 使用 /commands 列出可用命令
-/commands
+```mermaid
+sequenceDiagram
+    participant SM as AgentSession
+    participant ER as ExtensionRunner
+    participant E1 as Extension A
+    participant E2 as Extension B
+
+    SM->>ER: emitContext(messages)
+    ER->>E1: context handler
+    E1-->>ER: { messages: m1 }
+    ER->>E2: context handler (m1)
+    E2-->>ER: { messages: m2 }
+    ER-->>SM: m2
+
+    SM->>ER: emitToolCall(event)
+    ER->>E1: tool_call handler
+    E1-->>ER: mutate event.input
+    ER->>E2: tool_call handler
+    E2-->>ER: { block: false }
+    ER-->>SM: 合并结果
 ```
 
----
+## 能力地图
 
-## 10. 示例扩展清单
+```mermaid
+graph TB
+    subgraph "ExtensionAPI 能力"
+        direction TB
+        E["事件订阅 on()"]
+        T["工具 registerTool()"]
+        CMD["命令 registerCommand()"]
+        SK["快捷键 registerShortcut()"]
+        FL["标志 registerFlag()"]
+        MSG["消息 sendMessage/sendUserMessage"]
+        PRV["Provider registerProvider()"]
+        MDL["模型 setModel/setThinkingLevel()"]
+        SES["会话 setSessionName/setLabel/appendEntry"]
+    end
 
-| 扩展名 | 功能 | 演示 |
-|--------|------|------|
-| `hello.ts` | 最小工具示例 | 工具注册、参数处理 |
-| `commands.ts` | 命令 API | 命令注册、参数完成 |
-| `dynamic-tools.ts` | 动态工具 | 运行时工具注册 |
-| `input-transform.ts` | 输入转换 | 输入事件拦截 |
-| `message-renderer.ts` | 自定义渲染 | CustomMessage 渲染 |
-| `event-bus.ts` | 扩展间通信 | EventBus 使用 |
-| `confirm-destructive.ts` | 工具确认 | 拦截危险工具 |
-| `custom-footer.ts` | 自定义页脚 | UI 组件替换 |
-| `custom-header.ts` | 自定义页眉 | UI 组件替换 |
-| `git-checkpoint.ts` | Git 集成 | 工具结果处理 |
-| `auto-commit-on-exit.ts` | 自动提交 | session_shutdown 事件 |
+    subgraph "ExtensionContext 能力"
+        direction TB
+        UI["UI ctx.ui.*"]
+        ABORT["abort/compact"]
+        SYS["getSystemPrompt/getContextUsage"]
+        SM["sessionManager 只读"]
+    end
 
----
+    subgraph "ExtensionCommandContext 额外"
+        direction TB
+        WAIT["waitForIdle"]
+        NEW["newSession/fork/navigateTree"]
+        SW["switchSession/reload"]
+    end
 
-## 11. 总结
+    E --> RUNTIME["ExtensionRunner 分发"]
+    T --> AGENT["Agent 工具注册表"]
+    CMD --> SLASH["斜杠命令解析"]
+    PRV --> MR["ModelRegistry"]
+    UI --> TUI["Interactive Mode TUI"]
+```
 
-pi-mono 的扩展系统特点：
+## 关键源文件
 
-1. **类型安全**：完整的 TypeScript 类型定义
-2. **事件驱动**：30+ 预定义事件 + 自定义 EventBus
-3. **可拦截/可修改**：工具调用、输入、上下文均可拦截和修改
-4. **UI 集成**：丰富的 UI 交互方法
-5. **动态加载**：支持运行时工具注册
-6. **Provider 扩展**：支持自定义 LLM Provider
-7. **错误隔离**：单个扩展错误不影响其他扩展
-8. **生命周期管理**：清晰的加载、绑定、运行阶段
-
-这种扩展架构使 pi-mono 具有极高的可扩展性，是整个系统的核心设计模式之一。
-
----
-
-**相关文档**：
-- [架构概览](../02-architecture/01-architecture-overview.md)
-- [事件系统](../02-architecture/04-event-system.md)
-- [工具系统](./01-tool-system.md)
-- [会话系统](./03-session-system.md)
+| 文件 | 职责 |
+|------|------|
+| `extensions/types.ts` | 全部类型定义、ExtensionAPI |
+| `extensions/loader.ts` | jiti 加载、路径发现、ExtensionAPI 实现 |
+| `extensions/runner.ts` | 事件分发、结果合并、生命周期 |
+| `extensions/wrapper.ts` | 扩展工具包装 |
+| `extensions/index.ts` | 公共导出 |
+| `resource-loader.ts` | 扩展路径解析与 settings 集成 |

@@ -1,39 +1,43 @@
+%% 会话系统流程
 flowchart TD
-    subgraph "Session Management"
-        A[AgentSession] --> B[SessionManager]
-        B --> C[JSONL File]
-        C --> D[Load Entries]
-        D --> E[Build Index]
-        E --> F[Build Context]
+    subgraph "会话创建"
+        CREATE["SessionManager.create()"]
+        OPEN["SessionManager.open(path)"]
+        CONTINUE["SessionManager.continueRecent()"]
+        FORK["SessionManager.forkFrom(entryId)"]
+        INMEM["SessionManager.inMemory()"]
     end
 
-    subgraph "Operations"
-        G[Append Entry] --> H[Persist to JSONL]
-        I[Compact] --> J[Summarize Old Messages]
-        J --> K[Add CompactionEntry]
-        L[Navigate Tree] --> M[Change Leaf Pointer]
-        N[Fork] --> O[Create New Session File]
+    subgraph "JSONL 存储"
+        ENCODE["encodeSessionCwd(cwd)"]
+        DIR["~/.pi/agent/sessions/&lt;encoded-cwd&gt;/"]
+        FILE["xxx.jsonl"]
+        APPEND["追加写入条目"]
     end
 
-    subgraph "Entry Types"
-        P[SessionMessageEntry]
-        Q[CompactionEntry]
-        R[BranchSummaryEntry]
-        S[CustomEntry]
-        T[CustomMessageEntry]
-        U[LabelEntry]
-        V[SessionInfoEntry]
+    subgraph "树结构"
+        ROOT["根条目"]
+        MSG1["message (user)"]
+        MSG2["message (assistant)"]
+        TOOL["toolResult"]
+        BRANCH["分支点"]
+        COMP["compaction"]
+        BS["branch_summary"]
     end
 
-    F --> G
-    F --> I
-    F --> L
-    F --> N
+    subgraph "上下文构建"
+        PATH["提取 root → leaf 路径"]
+        CHECK_COMP{"有 compaction?"}
+        USE_COMP["摘要 + 后续消息"]
+        USE_ALL["所有消息"]
+        BUILD["SessionContext<br/>{messages, thinkingLevel, model}"]
+    end
 
-    style A fill:#e1f5fe
-    style B fill:#fff3e0
-    style C fill:#f3e5f5
-    style Q fill:#ffe0b2
-    style R fill:#ffe0b2
-    style S fill:#ffe0b2
-    style T fill:#ffe0b2
+    CREATE & OPEN & CONTINUE & FORK --> ENCODE --> DIR --> FILE
+    FILE --> APPEND
+    ROOT --> MSG1 --> MSG2 --> TOOL
+    MSG2 --> BRANCH --> BS
+    MSG1 --> COMP
+    PATH --> CHECK_COMP
+    CHECK_COMP -->|"是"| USE_COMP --> BUILD
+    CHECK_COMP -->|"否"| USE_ALL --> BUILD

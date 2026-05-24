@@ -1,737 +1,333 @@
-# 事件驱动架构深度分析
+# 事件驱动架构
 
-> 理解 pi-mono 的三层事件系统
+## 事件系统全景
 
----
-
-## 1. 事件系统概览
-
-pi-mono 采用**三层事件系统**，从底层到上层逐步扩展：
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Layer 3: EventBus                            │
-│                   自由频道，跨扩展通信                              │
-├─────────────────────────────────────────────────────────────────┤
-│                     Layer 2: ExtensionEvent                      │
-│              30+ 事件类型，扩展点、UI、会话管理                       │
-├─────────────────────────────────────────────────────────────────┤
-│                     Layer 1: AgentEvent                          │
-│           Agent 核心事件，生命周期、消息、工具执行                     │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 1.1 三层对比
-
-| 层次 | 定义位置 | 事件数量 | 用途 | 可取消/可修改 |
-|------|---------|---------|------|-------------|
-| **Layer 1** | `packages/agent/src/types.ts` | 10+ | Agent 核心生命周期 | 否 |
-| **Layer 2** | `packages/coding-agent/src/core/extensions/types.ts` | 30+ | 扩展点、UI、会话管理 | 是（部分） |
-| **Layer 3** | `packages/coding-agent/src/core/event-bus.ts` | 无限制 | 扩展间自由通信 | 否 |
-
----
-
-## 2. Layer 1: AgentEvent
-
-### 2.1 定义位置
-
-**文件**：`/packages/agent/src/types.ts`
-
-```typescript
-export type AgentEvent =
-    | AgentStartEvent        // Agent 启动
-    | AgentEndEvent          // Agent 结束
-    | TurnStartEvent         // 单轮对话开始
-    | TurnEndEvent           // 单轮对话结束
-    | MessageStartEvent      // 消息流开始
-    | MessageUpdateEvent     // 消息内容更新（token by token）
-    | MessageEndEvent        // 消息流结束
-    | ToolExecutionStartEvent // 工具执行开始
-    | ToolExecutionUpdateEvent // 工具执行更新
-    | ToolExecutionEndEvent;  // 工具执行结束
-```
-
-### 2.2 事件详解
-
-#### AgentStartEvent / AgentEndEvent
-
-```typescript
-interface AgentStartEvent {
-    type: "agent_start";
-    timestamp: number;
-}
-
-interface AgentEndEvent {
-    type: "agent_end";
-    timestamp: number;
-    reason: "aborted" | "complete" | "error";
-}
-```
-
-#### TurnStartEvent / TurnEndEvent
-
-```typescript
-interface TurnStartEvent {
-    type: "turn_start";
-    timestamp: number;
-    messages: AgentMessage[];
-}
-
-interface TurnEndEvent {
-    type: "turn_end";
-    timestamp: number;
-    messages: AgentMessage[];
-}
-```
-
-**用途**：跟踪单轮对话（一次 user + assistant 交互）
-
-#### MessageStartEvent / MessageUpdateEvent / MessageEndEvent
-
-```typescript
-interface MessageStartEvent {
-    type: "message_start";
-    timestamp: number;
-    message: AssistantMessage;
-}
-
-interface MessageUpdateEvent {
-    type: "message_update";
-    timestamp: number;
-    delta: string;  // 新增的文本
-    message: AssistantMessage;
-}
-
-interface MessageEndEvent {
-    type: "message_end";
-    timestamp: number;
-    message: AssistantMessage;
-}
-```
-
-**用途**：实时跟踪消息流，用于 UI 渲染
-
-#### ToolExecution*Event
-
-```typescript
-interface ToolExecutionStartEvent {
-    type: "tool_execution_start";
-    timestamp: number;
-    toolCall: ToolCall;
-}
-
-interface ToolExecutionUpdateEvent {
-    type: "tool_execution_update";
-    timestamp: number;
-    toolCall: ToolCall;
-    update: unknown;  // 工具特定的更新数据
-}
-
-interface ToolExecutionEndEvent {
-    type: "tool_execution_end";
-    timestamp: number;
-    toolCall: ToolCall;
-    result: AgentToolResult;
-}
-```
-
-**用途**：跟踪工具执行进度
-
-### 2.3 订阅机制
-
-```typescript
-class Agent {
-    private listeners: Array<(event: AgentEvent) => Promise<void>> = [];
-
-    subscribe(listener: (event: AgentEvent) => Promise<void>): () => void {
-        this.listeners.push(listener);
-        return () => {
-            this.listeners = this.listeners.filter(l => l !== listener);
-        };
-    }
-
-    async emit(event: AgentEvent) {
-        for (const listener of this.listeners) {
-            await listener(event);
-        }
-    }
-}
-```
-
-**特点**：
-- 按订阅顺序执行
-- 每个 listener 被 await
-- 返回取消订阅函数
-
----
-
-## 3. Layer 2: ExtensionEvent
-
-### 3.1 定义位置
-
-**文件**：`/packages/coding-agent/src/core/extensions/types.ts`
-
-**关键**：这个文件有 **1546 行**，是整个扩展系统的核心。
-
-### 3.2 事件分类
-
-#### 会话事件（Session Events）
-
-```typescript
-type SessionEvent =
-    | SessionStartEvent         // 会话启动
-    | SessionBeforeSwitchEvent  // 切换会话前（可取消）
-    | SessionBeforeCompactEvent // 压缩前（可取消）
-    | SessionBeforeForkEvent    // 分支前（可取消）
-    | SessionBeforeTreeEvent    // 打开树视图前（可取消）
-    | SessionEndEvent;          // 会话结束
-```
-
-**可取消事件示例**：
-
-```typescript
-interface SessionBeforeCompactEvent {
-    type: "session_before_compact";
-    session: AgentSession;
-    block: () => void;  // 调用此函数阻止压缩
-}
-```
-
-#### 工具事件（Tool Events）
-
-```typescript
-type ToolEvent =
-    | ToolCallEvent            // 工具调用前
-    | ToolResultEvent;         // 工具结果返回后（可修改）
-
-interface ToolCallEvent {
-    type: "tool_call";
-    toolCall: ToolCall;
-    arguments: unknown;
-    block: () => void;  // 可阻止工具执行
-}
-
-interface ToolResultEvent {
-    type: "tool_result";
-    toolCall: ToolCall;
-    result: AgentToolResult;
-    setResult: (result: AgentToolResult) => void;  // 可修改结果
-}
-```
-
-#### 输入事件（Input Events）
-
-```typescript
-type InputEvent =
-    | InputEvent               // 用户输入
-    | UserBashEvent;           // 用户执行 bash 命令
-
-interface InputEvent {
-    type: "input";
-    text: string;
-    modify: (text: string) => void;  // 可修改输入文本
-}
-```
-
-#### 上下文事件（Context Events）
-
-```typescript
-type ContextEvent =
-    | ContextEvent             // 上下文修改
-    | BeforeAgentStartEvent;   // Agent 启动前（修改提示）
-
-interface ContextEvent {
-    type: "context";
-    messages: AgentMessage[];
-    setMessages: (messages: AgentMessage[]) => void;  // 可修改上下文
-}
-
-interface BeforeAgentStartEvent {
-    type: "before_agent_start";
-    messages: AgentMessage[];
-    setMessages: (messages: AgentMessage[]) => void;
-}
-```
-
-#### Provider 事件（Provider Events）
-
-```typescript
-type ProviderEvent =
-    | ModelSelectEvent         // 模型选择
-    | BeforeProviderRequestEvent;  // Provider 请求前
-
-interface ModelSelectEvent {
-    type: "model_select";
-    model: Model<Api>;
-    setModel: (model: Model<Api>) => void;  // 可修改模型
-}
-
-interface BeforeProviderRequestEvent {
-    type: "before_provider_request";
-    model: Model<Api>;
-    messages: Message[];
-    options: SimpleStreamOptions;
-    setMessages: (messages: Message[]) => void;
-    setOptions: (options: SimpleStreamOptions) => void;
-}
-```
-
-#### UI 事件（UI Events）
-
-```typescript
-type UIEvent =
-    | RenderEvent              // 渲染事件（自定义组件）
-    | StatusEvent;             // 状态栏更新
-
-interface RenderEvent {
-    type: "render";
-    phase: "before" | "after";
-    container: Container;  // 可添加自定义组件
-}
-```
-
-### 3.3 完整事件列表
-
-**源文件**：`/packages/coding-agent/src/core/extensions/types.ts:588-962`
-
-```typescript
-export type ExtensionEvent =
-    // 资源发现
-    | ResourcesDiscoverEvent
-    // 会话管理
-    | SessionEvent
-    // 上下文修改
-    | ContextEvent
-    // Agent 启动前
-    | BeforeAgentStartEvent
-    // 工具调用和结果
-    | ToolCallEvent
-    | ToolResultEvent
-    // 消息流
-    | MessageStartEvent
-    | MessageUpdateEvent
-    | MessageEndEvent
-    // 用户输入
-    | InputEvent
-    | UserBashEvent
-    // 模型选择
-    | ModelSelectEvent
-    // Provider 请求
-    | BeforeProviderRequestEvent
-    // UI 渲染
-    | RenderEvent
-    | StatusEvent
-    // ... 更多事件
-    ;
-```
-
-**统计**：约 **30-40 个事件类型**
-
----
-
-## 4. Layer 3: EventBus
-
-### 4.1 定义位置
-
-**文件**：`/packages/coding-agent/src/core/event-bus.ts`
-
-### 4.2 API
-
-```typescript
-interface EventBus {
-    emit(channel: string, data: unknown): void;
-    on(channel: string, handler: (data: unknown) => void): () => void;
-    clear(): void;
-}
-```
-
-### 4.3 实现
-
-```typescript
-import { EventEmitter } from "events";
-
-export function createEventBus(): EventBusController {
-    const emitter = new EventEmitter();
-
-    return {
-        emit: (channel, data) => emitter.emit(channel, data),
-        on: (channel, handler) => {
-            const safeHandler = async (data: unknown) => {
-                try {
-                    await handler(data);
-                } catch (err) {
-                    console.error(`EventBus handler error (${channel}):`, err);
-                }
-            };
-            emitter.on(channel, safeHandler);
-            return () => emitter.off(channel, safeHandler);
-        },
-        clear: () => emitter.removeAllListeners()
-    };
-}
-```
-
-### 4.4 使用示例
-
-**扩展 A**：
-```typescript
-export default function (api: ExtensionAPI) {
-    // 发送自定义事件
-    api.events.emit("my-custom-event", { data: "hello" });
-}
-```
-
-**扩展 B**：
-```typescript
-export default function (api: ExtensionAPI) {
-    // 监听自定义事件
-    api.events.on("my-custom-event", (data) => {
-        console.log("Received:", data);
-    });
-}
-```
-
-### 4.5 特点
-
-- **自由频道**：任意字符串作为频道名
-- **错误隔离**：每个 handler 的错误不影响其他 handler
-- **轻量级**：基于 Node.js EventEmitter
-
----
-
-## 5. 事件系统关系图
+Pi 的事件系统贯穿从 Agent 核心到 UI 渲染的整个链条。事件层层传递、逐级丰富，是解耦各子系统的核心机制。
 
 ```mermaid
-graph TD
-    subgraph "Layer 1: AgentEvent"
-        AE1[agent_start]
-        AE2[turn_start]
-        AE3[message_start]
-        AE4[message_update]
-        AE5[message_end]
-        AE6[tool_execution_start]
-        AE7[tool_execution_end]
-        AE8[turn_end]
-        AE9[agent_end]
+graph TB
+    subgraph "Layer 1: pi-ai"
+        AE["AssistantMessageEvent<br/>start/text_delta/done/error"]
     end
 
-    subgraph "Layer 2: ExtensionEvent"
-        EE1[session_start]
-        EE2[session_before_switch]
-        EE3[session_before_compact]
-        EE4[tool_call]
-        EE5[tool_result]
-        EE6[input]
-        EE7[context]
-        EE8[before_agent_start]
-        EE9[model_select]
-        EE10[before_provider_request]
+    subgraph "Layer 2: pi-agent-core"
+        AGE["AgentEvent<br/>agent_start/turn_start/message_*/tool_*"]
     end
 
-    subgraph "Layer 3: EventBus"
-        EB[channel: string<br>data: unknown]
+    subgraph "Layer 3: pi-coding-agent"
+        ASE["AgentSessionEvent<br/>继承 AgentEvent + 扩展事件"]
+        EXE["ExtensionEvent<br/>30+ 事件类型"]
     end
 
-    AE1 -.映射到.-> EE1
-    AE6 -.映射到.-> EE4
-    AE7 -.映射到.-> EE5
+    subgraph "Layer 4: UI"
+        UIE["UI 更新<br/>组件创建/更新/销毁"]
+    end
 
-    EE4 -->|可取消| BLOCK{block?}
-    EE5 -->|可修改| MODIFY{modify result}
-    EE6 -->|可修改| MODIFY_INPUT{modify text}
-
-    BLOCK -->|true| STOP[阻止操作]
-    BLOCK -->|false| CONTINUE[继续执行]
-
-    MODIFY -->|修改后| NEW_RESULT[新结果]
-
-    EE8 -.可自由订阅.-> EB
-    EE9 -.可自由订阅.-> EB
-
-    style BLOCK fill:#bd10e0,color:#fff
-    style MODIFY fill:#f5a623
-    style MODIFY_INPUT fill:#f5a623
-    style STOP fill:#d0021b,color:#fff
+    AE -->|"封装为"| AGE
+    AGE -->|"丰富为"| ASE
+    ASE -->|"分发给"| EXE
+    ASE -->|"驱动"| UIE
 ```
 
----
+## Layer 1: AssistantMessageEvent (pi-ai)
 
-## 6. 事件处理流程
+LLM 供应商返回的流式事件，最底层的事件协议：
 
-### 6.1 AgentEvent → ExtensionEvent 映射
-
-**入口**：`/packages/coding-agent/src/core/agent-session.ts`
-
-```typescript
-// Agent 内部
-this.agent.subscribe(async (event) => {
-    switch (event.type) {
-        case "agent_start":
-            await this.extensionRunner.emit({
-                type: "session_start",
-                session: this
-            });
-            break;
-        case "message_start":
-            await this.extensionRunner.emit({
-                type: "message_start",
-                message: event.message
-            });
-            break;
-        // ... 更多映射
-    }
-});
+```mermaid
+stateDiagram-v2
+    [*] --> start
+    start --> text_start
+    start --> thinking_start
+    start --> toolcall_start
+    
+    text_start --> text_delta
+    text_delta --> text_delta
+    text_delta --> text_end
+    
+    thinking_start --> thinking_delta
+    thinking_delta --> thinking_delta
+    thinking_delta --> thinking_end
+    
+    toolcall_start --> toolcall_delta
+    toolcall_delta --> toolcall_delta
+    toolcall_delta --> toolcall_end
+    
+    text_end --> text_start: 多个文本块
+    text_end --> toolcall_start: 文本后工具
+    thinking_end --> text_start: 思考后文本
+    toolcall_end --> toolcall_start: 多个工具
+    
+    text_end --> done
+    toolcall_end --> done
+    text_end --> error
+    toolcall_end --> error
+    start --> error: 请求失败
 ```
 
-### 6.2 扩展事件分发
+| 事件 | 载荷 | 说明 |
+|------|------|------|
+| `start` | `{partial: AssistantMessage}` | 流开始，初始空消息 |
+| `text_start` | `{contentIndex, partial}` | 文本块开始 |
+| `text_delta` | `{contentIndex, delta, partial}` | 文本增量 |
+| `text_end` | `{contentIndex, content, partial}` | 文本块完成 |
+| `thinking_start/delta/end` | 同上结构 | 思考/推理块 |
+| `toolcall_start/delta/end` | `{contentIndex, toolCall, partial}` | 工具调用块 |
+| `done` | `{reason, message}` | 成功完成 |
+| `error` | `{reason, error}` | 错误终止 |
 
-**入口**：`/packages/coding-agent/src/core/extensions/runner.ts`
+## Layer 2: AgentEvent (pi-agent-core)
 
-```typescript
-class ExtensionRunner {
-    private handlers: Map<string, Array<ExtensionHandler>> = new Map();
+Agent 运行时事件，封装了完整的 turn/tool 生命周期：
 
-    async emit<TEvent extends ExtensionEvent>(event: TEvent) {
-        const handlers = this.handlers.get(event.type) || [];
-
-        for (const handler of handlers) {
-            try {
-                await handler(event);
-            } catch (err) {
-                console.error(`Handler error (${event.type}):`, err);
-            }
+```mermaid
+stateDiagram-v2
+    [*] --> agent_start
+    
+    agent_start --> turn_start
+    
+    state "Turn" as turn {
+        turn_start2: turn_start
+        turn_start2 --> message_start_user: 用户消息
+        message_start_user --> message_end_user
+        message_end_user --> message_start_assistant: 流式助手回复
+        
+        state "Assistant Streaming" as streaming {
+            message_start_assistant2: message_start
+            message_start_assistant2 --> message_update: 流式更新
+            message_update --> message_update
+            message_update --> message_end_assistant: message_end
         }
-
-        // 根据事件类型合并结果
-        return this.mergeResults(event.type);
+        
+        message_end_assistant --> tool_execution_start: 有工具调用
+        
+        state "Tool Execution" as tool {
+            tool_execution_start2: tool_execution_start
+            tool_execution_start2 --> tool_execution_update
+            tool_execution_update --> tool_execution_update
+            tool_execution_update --> tool_execution_end
+        }
+        
+        tool_execution_end --> message_start_toolresult
+        message_start_toolresult --> message_end_toolresult
+        
+        message_end_toolresult --> turn_end
+        message_end_assistant --> turn_end: 无工具调用
     }
-}
+    
+    turn_end --> turn_start: 有更多工具/消息
+    turn_end --> agent_end: 完成
+    
+    agent_end --> [*]
 ```
 
-### 6.3 可取消事件处理
+| 事件 | 时机 | 关键载荷 |
+|------|------|---------|
+| `agent_start` | 循环开始 | 无 |
+| `agent_end` | 循环结束 | `messages: AgentMessage[]` |
+| `turn_start` | 新一轮开始 | 无 |
+| `turn_end` | 一轮结束 | `message, toolResults` |
+| `message_start` | 消息开始 | `message: AgentMessage` |
+| `message_update` | 助手流式更新 | `message, assistantMessageEvent` |
+| `message_end` | 消息结束 | `message: AgentMessage` |
+| `tool_execution_start` | 工具开始执行 | `toolCallId, toolName, args` |
+| `tool_execution_update` | 工具部分输出 | `partialResult` |
+| `tool_execution_end` | 工具执行完成 | `result, isError` |
 
-```typescript
-async function canBeBlocked(event: BlockableEvent) {
-    let blocked = false;
+## Layer 3: ExtensionEvent (pi-coding-agent)
 
-    // 给事件添加 block 方法
-    event.block = () => { blocked = true; };
+扩展系统的事件是最丰富的层，包含 30+ 种事件类型：
 
-    // 发送给所有处理器
-    await this.emit(event);
+```mermaid
+graph TB
+    subgraph "资源事件"
+        RD["resources_discover"]
+    end
 
-    // 检查是否被阻止
-    if (blocked) {
-        return { blocked: true };
-    }
+    subgraph "会话事件"
+        SS["session_start"]
+        SBS["session_before_switch"]
+        SBF["session_before_fork"]
+        SBC["session_before_compact"]
+        SC["session_compact"]
+        SBT["session_before_tree"]
+        ST["session_tree"]
+        SSD["session_shutdown"]
+    end
 
-    return { blocked: false };
-}
+    subgraph "Agent 事件"
+        CTX["context"]
+        BPR["before_provider_request"]
+        APR["after_provider_response"]
+        BAS["before_agent_start"]
+        AS["agent_start"]
+        AE["agent_end"]
+        TS["turn_start"]
+        TE["turn_end"]
+    end
+
+    subgraph "消息事件"
+        MS["message_start"]
+        MU["message_update"]
+        ME["message_end"]
+    end
+
+    subgraph "工具事件"
+        TES["tool_execution_start"]
+        TEU["tool_execution_update"]
+        TEE["tool_execution_end"]
+        TC["tool_call"]
+        TR["tool_result"]
+    end
+
+    subgraph "输入事件"
+        INP["input"]
+        UB["user_bash"]
+    end
+
+    subgraph "模型事件"
+        MSE["model_select"]
+        TLS["thinking_level_select"]
+    end
 ```
 
-### 6.4 可修改事件处理
+### 事件分类
 
-```typescript
-async function canBeModified<T>(event: ModifiableEvent<T>) {
-    let modifiedValue: T | undefined;
+#### 可拦截事件（返回结果影响行为）
 
-    // 给事件添加修改方法
-    event.setModified = (value: T) => { modifiedValue = value; };
+| 事件 | 返回结果 | 拦截能力 |
+|------|---------|---------|
+| `input` | `action: "handled"` | 完全接管输入处理 |
+| `input` | `action: "transform"` | 修改输入文本 |
+| `tool_call` | `{block: true}` | 阻止工具执行 |
+| `tool_result` | `{content, isError}` | 修改工具结果 |
+| `context` | `{messages}` | 替换上下文消息 |
+| `before_provider_request` | payload | 替换请求负载 |
+| `before_agent_start` | `{systemPrompt}` | 替换系统提示 |
+| `message_end` | `{message}` | 替换最终消息 |
+| `session_before_switch` | `{cancel: true}` | 取消会话切换 |
+| `session_before_fork` | `{cancel: true}` | 取消分支 |
+| `session_before_compact` | `{cancel: true}` | 取消压缩 |
+| `session_before_tree` | `{cancel: true}` | 取消树导航 |
+| `user_bash` | `{operations, result}` | 替换 bash 执行 |
 
-    // 发送给所有处理器
-    await this.emit(event);
+#### 通知事件（只读观察）
 
-    // 返回修改后的值或原值
-    return modifiedValue ?? event.originalValue;
-}
+| 事件 | 用途 |
+|------|------|
+| `session_start` | 会话初始化后的设置 |
+| `session_compact` | 压缩完成后的通知 |
+| `session_tree` | 树导航完成后的通知 |
+| `session_shutdown` | 清理资源 |
+| `agent_start/end` | Agent 运行状态追踪 |
+| `turn_start/end` | 轮次追踪 |
+| `message_start/update` | UI 渲染驱动 |
+| `tool_execution_*` | 工具执行追踪 |
+| `model_select` | 模型变更追踪 |
+| `thinking_level_select` | 思考级别变更追踪 |
+
+## 事件分发机制
+
+```mermaid
+sequenceDiagram
+    participant Source as 事件源
+    participant Runner as ExtensionRunner
+    participant Ext1 as 扩展 1
+    participant Ext2 as 扩展 2
+    participant Core as 核心处理
+
+    Source->>Runner: dispatchEvent(event)
+    Runner->>Ext1: handler(event, ctx)
+    Ext1->>Runner: result1
+    Runner->>Ext2: handler(event, ctx)
+    Ext2->>Runner: result2
+    Runner->>Runner: 合并结果
+    Runner->>Core: 返回合并后的结果
 ```
 
----
+### 结果合并策略
 
-## 7. 扩展中的事件处理
-
-### 7.1 订阅事件
-
-```typescript
-export default function (api: ExtensionAPI) {
-    // 订阅单个事件
-    api.on("tool_call", async (event) => {
-        console.log("Tool called:", event.toolCall.name);
-    });
-
-    // 订阅多个事件
-    api.on(["message_start", "message_end"], async (event) => {
-        console.log("Message event:", event.type);
-    });
-}
-```
-
-### 7.2 阻止操作
-
-```typescript
-api.on("session_before_compact", async (event) => {
-    // 检查是否应该阻止压缩
-    if (shouldPreventCompaction(event.session)) {
-        event.block();  // 阻止压缩
-    }
-});
-```
-
-### 7.3 修改结果
-
-```typescript
-api.on("tool_result", async (event) => {
-    // 修改工具结果
-    if (event.toolCall.name === "read") {
-        event.setResult({
-            ...event.result,
-            content: modifyContent(event.result.content)
-        });
-    }
-});
-```
-
-### 7.4 修改输入
-
-```typescript
-api.on("input", async (event) => {
-    // 自动修正拼写错误
-    const corrected = spellCheck(event.text);
-    if (corrected !== event.text) {
-        event.modify(corrected);
-    }
-});
-```
-
-### 7.5 使用 EventBus
-
-```typescript
-export default function (api: ExtensionAPI) {
-    // 发送自定义事件
-    api.events.emit("my-extension:status", {
-        status: "ready"
-    });
-
-    // 监听其他扩展的事件
-    api.events.on("other-extension:event", (data) => {
-        console.log("Received:", data);
-    });
-}
-```
-
----
-
-## 8. 事件系统最佳实践
-
-### 8.1 选择合适的事件层
-
-| 使用场景 | 推荐层次 |
+| 事件类型 | 合并策略 |
 |---------|---------|
-| Agent 核心逻辑扩展 | Layer 1 (AgentEvent) |
-| 应用功能扩展（会话、工具、UI） | Layer 2 (ExtensionEvent) |
-| 扩展间通信 | Layer 3 (EventBus) |
+| `tool_call` | 任一 `block: true` 则阻止 |
+| `tool_result` | 最后一个非空结果生效 |
+| `context` | 最后一个非空 messages 生效 |
+| `before_agent_start` | systemPrompt 链式替换 |
+| `input` | 第一个 `handled` 或最后一个 `transform` |
+| `session_before_*` | 任一 `cancel: true` 则取消 |
 
-### 8.2 避免事件循环
+## 事件与 UI 的映射
 
-```typescript
-// ❌ 错误：可能导致无限循环
-api.on("tool_result", async (event) => {
-    api.sendMessage("Tool done!");  // 可能触发新的 tool_result
-});
+```mermaid
+graph LR
+    subgraph "事件"
+        E1["agent_start"]
+        E2["message_start<br/>(assistant)"]
+        E3["message_update"]
+        E4["tool_execution_start"]
+        E5["tool_execution_update"]
+        E6["tool_execution_end"]
+        E7["message_end"]
+        E8["agent_end"]
+    end
 
-// ✅ 正确：使用标志防止循环
-let handlingResult = false;
-api.on("tool_result", async (event) => {
-    if (handlingResult) return;
-    handlingResult = true;
-    await api.sendMessage("Tool done!");
-    handlingResult = false;
-});
+    subgraph "UI 操作"
+        U1["显示加载动画"]
+        U2["创建 AssistantMessageComponent"]
+        U3["增量渲染 Markdown"]
+        U4["创建 ToolExecutionComponent"]
+        U5["更新工具输出"]
+        U6["完成工具显示"]
+        U7["完成消息"]
+        U8["移除加载, 恢复编辑器焦点"]
+    end
+
+    E1 --> U1
+    E2 --> U2
+    E3 --> U3
+    E4 --> U4
+    E5 --> U5
+    E6 --> U6
+    E7 --> U7
+    E8 --> U8
 ```
 
-### 8.3 异步处理
+## 钩子系统 (AgentHarness)
 
-```typescript
-api.on("message_end", async (event) => {
-    // 长时间运行的操作
-    await processMessage(event.message);
-});
+AgentHarness 层的钩子提供了比扩展事件更底层的控制点：
+
+```mermaid
+graph TB
+    subgraph "AgentHarness 钩子"
+        H1["beforeToolCall<br/>工具执行前"]
+        H2["afterToolCall<br/>工具执行后"]
+        H3["shouldStopAfterTurn<br/>是否停止"]
+        H4["prepareNextTurn<br/>准备下一轮"]
+        H5["getSteeringMessages<br/>获取 steering 消息"]
+        H6["getFollowUpMessages<br/>获取 follow-up 消息"]
+        H7["convertToLlm<br/>消息转换"]
+        H8["transformContext<br/>上下文变换"]
+        H9["getApiKey<br/>动态 API Key"]
+    end
+
+    subgraph "调用时机"
+        T1["工具参数验证后"]
+        T2["工具执行完成后"]
+        T3["turn_end 后"]
+        T4["准备下次 LLM 调用前"]
+        T5["每轮结束时"]
+        T6["Agent 即将停止时"]
+        T7["每次 LLM 调用前"]
+        T8["convertToLlm 前"]
+        T9["每次 LLM 调用前"]
+    end
+
+    H1 --- T1
+    H2 --- T2
+    H3 --- T3
+    H4 --- T4
+    H5 --- T5
+    H6 --- T6
+    H7 --- T7
+    H8 --- T8
+    H9 --- T9
 ```
-
-### 8.4 错误处理
-
-```typescript
-api.on("tool_call", async (event) => {
-    try {
-        await doSomething();
-    } catch (err) {
-        console.error("Handler error:", err);
-        // 不重新抛出，避免影响其他处理器
-    }
-});
-```
-
----
-
-## 9. 调试事件系统
-
-### 9.1 启用事件日志
-
-```typescript
-export default function (api: ExtensionAPI) {
-    // 记录所有事件
-    api.on("*", async (event) => {
-        console.log("[EVENT]", event.type, event);
-    });
-}
-```
-
-### 9.2 追踪事件流
-
-```typescript
-let depth = 0;
-api.on("*", async (event) => {
-    console.log("  ".repeat(depth) + `→ ${event.type}`);
-    depth++;
-    // ... 处理逻辑
-    depth--;
-    console.log("  ".repeat(depth) + `← ${event.type}`);
-});
-```
-
-### 9.3 检查事件顺序
-
-```typescript
-const events: string[] = [];
-api.on("*", async (event) => {
-    events.push(event.type);
-});
-
-// 执行操作
-await doSomething();
-
-// 检查事件顺序
-console.log(events);
-// ["session_start", "before_agent_start", "message_start", ...]
-```
-
----
-
-## 10. 总结
-
-pi-mono 的三层事件系统设计：
-
-1. **分层清晰**：每层有明确的职责
-2. **扩展性强**：30+ 预定义事件 + 自定义 EventBus
-3. **可控性高**：可取消、可修改事件
-4. **错误隔离**：单个处理器错误不影响其他
-5. **类型安全**：TypeScript 完整类型定义
-
-这种事件驱动架构使得 pi-mono 具有极高的可扩展性，是整个扩展系统的基础。
-
----
-
-**相关文档**：
-- [架构概览](./01-architecture-overview.md)
-- [扩展系统](../04-subsystems/02-extension-system.md)
-- [pi-agent-core 包分析](../03-packages/02-pi-agent-core.md)
